@@ -5,7 +5,7 @@ import { toolJsonResult } from "./common.js";
 
 export function registerGetContextTool(server: McpServer, memory: MemoryService): void {
   server.registerTool(
-    "memory.get_context",
+    "memory_get_context",
     {
       title: "Get Context",
       description:

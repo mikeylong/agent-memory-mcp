@@ -5,7 +5,7 @@ import { scopeRefSchema, toolJsonResult } from "./common.js";
 
 export function registerCaptureTool(server: McpServer, memory: MemoryService): void {
   server.registerTool(
-    "memory.capture",
+    "memory_capture",
     {
       title: "Capture Memory",
       description:

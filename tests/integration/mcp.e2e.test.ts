@@ -157,13 +157,13 @@ describe("agent-memory-mcp integration", () => {
 
     expect(toolNames).toEqual(
       expect.arrayContaining([
-        "memory.get_context",
-        "memory.search",
-        "memory.upsert",
-        "memory.capture",
-        "memory.delete",
-        "memory.forget_scope",
-        "memory.health",
+        "memory_get_context",
+        "memory_search",
+        "memory_upsert",
+        "memory_capture",
+        "memory_delete",
+        "memory_forget_scope",
+        "memory_health",
       ]),
     );
 
@@ -171,7 +171,7 @@ describe("agent-memory-mcp integration", () => {
       {
         method: "tools/call",
         params: {
-          name: "memory.upsert",
+          name: "memory_upsert",
           arguments: {
             content: "missing required scope",
           },
@@ -192,7 +192,7 @@ describe("agent-memory-mcp integration", () => {
     const projectScopeId = hashProjectPath(projectPath);
 
     const upsertResult = await fixture.client.callTool({
-      name: "memory.upsert",
+      name: "memory_upsert",
       arguments: {
         scope: { type: "project", id: projectScopeId },
         content: "Use pnpm for installs in this repo.",
@@ -205,7 +205,7 @@ describe("agent-memory-mcp integration", () => {
     expect(upsertPayload.created).toBe(true);
 
     const searchResult = await fixture.client.callTool({
-      name: "memory.search",
+      name: "memory_search",
       arguments: {
         query: "pnpm installs",
         scopes: [{ type: "project", id: projectScopeId }],
@@ -219,7 +219,7 @@ describe("agent-memory-mcp integration", () => {
     expect(searchPayload.items[0].content).toContain("pnpm");
 
     const contextResult = await fixture.client.callTool({
-      name: "memory.get_context",
+      name: "memory_get_context",
       arguments: {
         query: "how do we install dependencies",
         project_path: projectPath,
@@ -245,7 +245,7 @@ describe("agent-memory-mcp integration", () => {
     });
 
     const healthy = await healthyFixture.client.callTool({
-      name: "memory.health",
+      name: "memory_health",
       arguments: {},
     });
     const healthyPayload = parseToolPayload(healthy as any);
@@ -257,14 +257,14 @@ describe("agent-memory-mcp integration", () => {
     cleanups.push(degradedFixture.cleanup);
 
     const degraded = await degradedFixture.client.callTool({
-      name: "memory.health",
+      name: "memory_health",
       arguments: {},
     });
     const degradedPayload = parseToolPayload(degraded as any);
     expect(degradedPayload.embeddings).toBe("degraded");
 
     const upsert = await degradedFixture.client.callTool({
-      name: "memory.upsert",
+      name: "memory_upsert",
       arguments: {
         scope: { type: "global" },
         content: "Lexical fallback should still work.",
@@ -283,7 +283,7 @@ describe("agent-memory-mcp integration", () => {
 
     const writes = Array.from({ length: 20 }, (_, i) =>
       fixture.client.callTool({
-        name: "memory.upsert",
+        name: "memory_upsert",
         arguments: {
           scope: { type: "project", id: "shared-project" },
           content: `Concurrent memory entry ${i} for cross-agent transfer.`,
@@ -297,7 +297,7 @@ describe("agent-memory-mcp integration", () => {
     await Promise.all(writes);
 
     const searchResult = await fixture.client.callTool({
-      name: "memory.search",
+      name: "memory_search",
       arguments: {
         query: "cross-agent transfer",
         scopes: [{ type: "project", id: "shared-project" }],

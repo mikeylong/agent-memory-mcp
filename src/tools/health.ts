@@ -4,7 +4,7 @@ import { toolJsonResult } from "./common.js";
 
 export function registerHealthTool(server: McpServer, memory: MemoryService): void {
   server.registerTool(
-    "memory.health",
+    "memory_health",
     {
       title: "Memory Health",
       description: "Return DB and embeddings health status.",

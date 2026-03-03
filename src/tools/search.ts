@@ -5,7 +5,7 @@ import { scopeSelectorSchema, toolJsonResult } from "./common.js";
 
 export function registerSearchTool(server: McpServer, memory: MemoryService): void {
   server.registerTool(
-    "memory.search",
+    "memory_search",
     {
       title: "Search Memory",
       description: "Search memories using lexical and semantic ranking.",

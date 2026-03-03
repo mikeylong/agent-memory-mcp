@@ -5,7 +5,7 @@ import { scopeRefSchema, toolJsonResult } from "./common.js";
 
 export function registerForgetScopeTool(server: McpServer, memory: MemoryService): void {
   server.registerTool(
-    "memory.forget_scope",
+    "memory_forget_scope",
     {
       title: "Forget Scope",
       description: "Bulk soft-delete memories for a scope.",

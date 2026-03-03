@@ -214,7 +214,7 @@ function helpText(): string {
     "  -h, --help              Show this help text",
     "",
     "Turn behavior (enforced):",
-    "  1) Runs memory.get_context equivalent before every prompt",
+    "  1) Runs memory_get_context equivalent before every prompt",
     "  2) Captures turn transcript and extracted facts after every response",
   ].join("\n");
 }

@@ -5,7 +5,7 @@ import { scopeRefSchema, toolJsonResult } from "./common.js";
 
 export function registerUpsertTool(server: McpServer, memory: MemoryService): void {
   server.registerTool(
-    "memory.upsert",
+    "memory_upsert",
     {
       title: "Upsert Memory",
       description: "Create or update durable memory with dedupe and redaction.",

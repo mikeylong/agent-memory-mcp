@@ -25,7 +25,7 @@ This project keeps important context local and reusable so each new chat does no
 
 ## How It Works (60-second architecture)
 
-1. An MCP client calls tools like `memory.get_context`, `memory.search`, `memory.upsert`, and `memory.capture`.
+1. An MCP client calls tools like `memory_get_context`, `memory_search`, `memory_upsert`, and `memory_capture`.
 2. Memory entries are persisted to local SQLite (`$HOME/.agent-memory/memory.db` by default).
 3. Retrieval combines lexical search (FTS5) with semantic similarity when embeddings are available.
 4. If embeddings are unavailable, the server continues to operate with lexical ranking.
@@ -38,13 +38,13 @@ Core scopes in plain language:
 
 ### Tool Surface
 
-- `memory.get_context`: return a ranked context bundle for a prompt.
-- `memory.search`: raw retrieval for agent reasoning.
-- `memory.upsert`: explicit write/update.
-- `memory.capture`: extract durable facts from transcript-like text.
-- `memory.delete`: delete one memory entry.
-- `memory.forget_scope`: bulk-delete by scope.
-- `memory.health`: operational status.
+- `memory_get_context`: return a ranked context bundle for a prompt.
+- `memory_search`: raw retrieval for agent reasoning.
+- `memory_upsert`: explicit write/update.
+- `memory_capture`: extract durable facts from transcript-like text.
+- `memory_delete`: delete one memory entry.
+- `memory_forget_scope`: bulk-delete by scope.
+- `memory_health`: operational status.
 
 ## Privacy and Security Model
 
@@ -96,7 +96,7 @@ Use the same `AGENT_MEMORY_HOME` across clients so memory is shared.
 
 ### 4. Sanity-check health
 
-Call `memory.health` from your MCP client. Expected shape:
+Call `memory_health` from your MCP client. Expected shape:
 
 ```json
 { "ok": true, "db": "ok", "embeddings": "ok", "version": "0.1.0 (schema 1)" }
@@ -104,11 +104,11 @@ Call `memory.health` from your MCP client. Expected shape:
 
 ### 5. First run flow (end-to-end)
 
-1. Write one project fact with `memory.upsert` and project metadata path.
-2. Query it with `memory.search`.
-3. Ask `memory.get_context` with your current prompt text.
+1. Write one project fact with `memory_upsert` and project metadata path.
+2. Query it with `memory_search`.
+3. Ask `memory_get_context` with your current prompt text.
 
-Example `memory.upsert` payload:
+Example `memory_upsert` payload:
 
 ```json
 {
@@ -120,8 +120,8 @@ Example `memory.upsert` payload:
 
 ## Cross-Agent Verification (Codex <-> Claude)
 
-1. In Codex, call `memory.upsert` with project metadata path `$HOME/projects/agent-memory`.
-2. In Claude Desktop, call `memory.search` for the same content.
+1. In Codex, call `memory_upsert` with project metadata path `$HOME/projects/agent-memory`.
+2. In Claude Desktop, call `memory_search` for the same content.
 3. Confirm the same fact is returned in both clients.
 
 If you need explicit project scope id, hash the absolute path:
