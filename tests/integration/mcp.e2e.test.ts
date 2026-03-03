@@ -1,0 +1,321 @@
+import fs from "node:fs/promises";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
+import { hashProjectPath } from "../../src/scope.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { afterEach, describe, expect, it } from "vitest";
+
+interface ClientFixture {
+  client: Client;
+  transport: StdioClientTransport;
+  cleanup: () => Promise<void>;
+  dbPath: string;
+}
+
+const cleanups: Array<() => Promise<void>> = [];
+
+afterEach(async () => {
+  while (cleanups.length > 0) {
+    const cleanup = cleanups.pop();
+    if (cleanup) {
+      await cleanup();
+    }
+  }
+});
+
+function parseToolPayload(result: { content: Array<{ type: string; text?: string }>; structuredContent?: unknown }): any {
+  if (result.structuredContent !== undefined) {
+    return result.structuredContent;
+  }
+
+  const text = result.content.find((entry) => entry.type === "text")?.text;
+  if (!text) {
+    throw new Error("Tool result did not contain text content");
+  }
+
+  return JSON.parse(text);
+}
+
+function sanitizeEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
+}
+
+async function createClientFixture(envOverrides: Record<string, string>): Promise<ClientFixture> {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-memory-mcp-int-"));
+  const dbPath = path.join(tempDir, "memory.db");
+  const root = process.cwd();
+
+  const serverArgs = [
+    path.join(root, "node_modules", "tsx", "dist", "cli.mjs"),
+    path.join(root, "src", "index.ts"),
+  ];
+
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: serverArgs,
+    cwd: root,
+    env: {
+      ...sanitizeEnv(process.env),
+      AGENT_MEMORY_HOME: tempDir,
+      AGENT_MEMORY_DB_PATH: dbPath,
+      ...envOverrides,
+    },
+    stderr: "pipe",
+  });
+
+  const client = new Client({
+    name: "agent-memory-mcp-test-client",
+    version: "0.1.0",
+  });
+
+  await client.connect(transport);
+
+  return {
+    client,
+    transport,
+    dbPath,
+    cleanup: async () => {
+      await transport.close();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    },
+  };
+}
+
+async function startMockOllama(): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = http.createServer((req, res) => {
+    if (req.method === "GET" && req.url === "/api/tags") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ models: [] }));
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/embed") {
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk.toString();
+      });
+      req.on("end", () => {
+        const parsed = JSON.parse(body) as { input: string[] | string };
+        const input = Array.isArray(parsed.input) ? parsed.input : [String(parsed.input)];
+        const embeddings = input.map((text) => [text.length % 10, 0.5, 0.1]);
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ embeddings }));
+      });
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/embeddings") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ embedding: [0.2, 0.3, 0.4] }));
+      return;
+    }
+
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "not found" }));
+  });
+
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Failed to start mock Ollama server");
+  }
+
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    close: async () => {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    },
+  };
+}
+
+describe("agent-memory-mcp integration", () => {
+  it("registers tools and enforces schema validation", async () => {
+    const fixture = await createClientFixture({
+      AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+    });
+    cleanups.push(fixture.cleanup);
+
+    const tools = await fixture.client.listTools();
+    const toolNames = tools.tools.map((tool) => tool.name);
+
+    expect(toolNames).toEqual(
+      expect.arrayContaining([
+        "memory.get_context",
+        "memory.search",
+        "memory.upsert",
+        "memory.capture",
+        "memory.delete",
+        "memory.forget_scope",
+        "memory.health",
+      ]),
+    );
+
+    const invalid = await fixture.client.request(
+      {
+        method: "tools/call",
+        params: {
+          name: "memory.upsert",
+          arguments: {
+            content: "missing required scope",
+          },
+        },
+      },
+      CallToolResultSchema,
+    );
+
+    expect(invalid.isError).toBe(true);
+  });
+
+  it("supports upsert -> search -> get_context workflow", async () => {
+    const fixture = await createClientFixture({
+      AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+    });
+    cleanups.push(fixture.cleanup);
+    const projectPath = "/tmp/project-abc";
+    const projectScopeId = hashProjectPath(projectPath);
+
+    const upsertResult = await fixture.client.callTool({
+      name: "memory.upsert",
+      arguments: {
+        scope: { type: "project", id: projectScopeId },
+        content: "Use pnpm for installs in this repo.",
+        tags: ["tooling"],
+        metadata: { source_agent: "codex", project_path: projectPath },
+      },
+    });
+
+    const upsertPayload = parseToolPayload(upsertResult as any);
+    expect(upsertPayload.created).toBe(true);
+
+    const searchResult = await fixture.client.callTool({
+      name: "memory.search",
+      arguments: {
+        query: "pnpm installs",
+        scopes: [{ type: "project", id: projectScopeId }],
+        limit: 10,
+        include_metadata: true,
+      },
+    });
+
+    const searchPayload = parseToolPayload(searchResult as any);
+    expect(searchPayload.total).toBeGreaterThan(0);
+    expect(searchPayload.items[0].content).toContain("pnpm");
+
+    const contextResult = await fixture.client.callTool({
+      name: "memory.get_context",
+      arguments: {
+        query: "how do we install dependencies",
+        project_path: projectPath,
+        max_items: 5,
+      },
+    });
+
+    const contextPayload = parseToolPayload(contextResult as any);
+    expect(contextPayload.items.length).toBeGreaterThan(0);
+    expect(typeof contextPayload.summary).toBe("string");
+    expect(contextPayload.scores).toBeTypeOf("object");
+  });
+
+  it("reports embeddings available and degraded states", async () => {
+    const mock = await startMockOllama();
+
+    const healthyFixture = await createClientFixture({
+      AGENT_MEMORY_OLLAMA_URL: mock.url,
+    });
+    cleanups.push(async () => {
+      await healthyFixture.cleanup();
+      await mock.close();
+    });
+
+    const healthy = await healthyFixture.client.callTool({
+      name: "memory.health",
+      arguments: {},
+    });
+    const healthyPayload = parseToolPayload(healthy as any);
+    expect(healthyPayload.embeddings).toBe("ok");
+
+    const degradedFixture = await createClientFixture({
+      AGENT_MEMORY_OLLAMA_URL: "http://127.0.0.1:9",
+    });
+    cleanups.push(degradedFixture.cleanup);
+
+    const degraded = await degradedFixture.client.callTool({
+      name: "memory.health",
+      arguments: {},
+    });
+    const degradedPayload = parseToolPayload(degraded as any);
+    expect(degradedPayload.embeddings).toBe("degraded");
+
+    const upsert = await degradedFixture.client.callTool({
+      name: "memory.upsert",
+      arguments: {
+        scope: { type: "global" },
+        content: "Lexical fallback should still work.",
+      },
+    });
+
+    const upsertPayload = parseToolPayload(upsert as any);
+    expect(upsertPayload.id).toBeTypeOf("string");
+  });
+
+  it("supports cross-agent metadata and concurrent reads/writes", async () => {
+    const fixture = await createClientFixture({
+      AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+    });
+    cleanups.push(fixture.cleanup);
+
+    const writes = Array.from({ length: 20 }, (_, i) =>
+      fixture.client.callTool({
+        name: "memory.upsert",
+        arguments: {
+          scope: { type: "project", id: "shared-project" },
+          content: `Concurrent memory entry ${i} for cross-agent transfer.`,
+          metadata: {
+            source_agent: i % 2 === 0 ? "codex" : "claude",
+          },
+        },
+      }),
+    );
+
+    await Promise.all(writes);
+
+    const searchResult = await fixture.client.callTool({
+      name: "memory.search",
+      arguments: {
+        query: "cross-agent transfer",
+        scopes: [{ type: "project", id: "shared-project" }],
+        limit: 50,
+        include_metadata: true,
+      },
+    });
+
+    const payload = parseToolPayload(searchResult as any);
+    expect(payload.total).toBeGreaterThanOrEqual(20);
+
+    const agents = new Set(
+      payload.items
+        .map((item: any) => item.source_agent)
+        .filter((agent: unknown): agent is string => typeof agent === "string"),
+    );
+
+    expect(agents.has("codex")).toBe(true);
+    expect(agents.has("claude")).toBe(true);
+  });
+});
