@@ -8,6 +8,7 @@
     "agent-memory-mcp": "dist/index.js",
     "agent-memory-wrapper": "dist/wrapper.js",
     "agent-memory-import-codex": "dist/importCodexSession.js",
+    "agent-memory-import-claude": "dist/importClaudeSession.js",
     "agent-memory-import-chatgpt": "dist/importChatgptExport.js"
   },
   "scripts": {
@@ -16,6 +17,9 @@
     "privacy:scan": "bash scripts/privacy-scan.sh",
     "wrapper": "tsx src/wrapper.ts",
     "import:codex-session": "tsx src/importCodexSession.ts",
+    "import:claude-session": "tsx src/importClaudeSession.ts",
+    "import:codex:latest": "bash scripts/import-codex-session.sh",
+    "import:claude:latest": "bash scripts/import-claude-session.sh",
     "import:chatgpt-export": "tsx src/importChatgptExport.ts",
     "wrapper:codex": "tsx src/wrapper.ts --codex",
     "wrapper:claude": "tsx src/wrapper.ts --claude",
