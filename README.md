@@ -151,14 +151,28 @@ node dist/index.js
 
 ### Wrapper mode (enforce memory every prompt)
 
+Codex:
+
 ```bash
 node dist/wrapper.js --codex --project-path "$HOME/projects/agent-memory" --session-id my-session
 ```
 
-Shortcut:
+Codex shortcut:
 
 ```bash
 scripts/codex-memory.sh "$HOME/projects/agent-memory" my-session
+```
+
+Claude Code:
+
+```bash
+node dist/wrapper.js --claude --project-path "$HOME/projects/agent-memory" --session-id my-session
+```
+
+Claude Code shortcut:
+
+```bash
+scripts/claude-memory.sh "$HOME/projects/agent-memory" my-session
 ```
 
 ### Claude Code mode

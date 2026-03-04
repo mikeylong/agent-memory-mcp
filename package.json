@@ -18,6 +18,7 @@
     "import:codex-session": "tsx src/importCodexSession.ts",
     "import:chatgpt-export": "tsx src/importChatgptExport.ts",
     "wrapper:codex": "tsx src/wrapper.ts --codex",
+    "wrapper:claude": "tsx src/wrapper.ts --claude",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",

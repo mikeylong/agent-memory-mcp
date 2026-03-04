@@ -43,6 +43,7 @@ export function parseWrapperArgs(argv: string[], cwd = process.cwd()): WrapperOp
   let tokenBudget = 1200;
   let modelCommand: string | undefined;
   let codexMode = false;
+  let claudeMode = false;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -102,6 +103,11 @@ export function parseWrapperArgs(argv: string[], cwd = process.cwd()): WrapperOp
       continue;
     }
 
+    if (arg === "--claude") {
+      claudeMode = true;
+      continue;
+    }
+
     if (arg === "--help" || arg === "-h") {
       return {
         projectPath,
@@ -116,16 +122,23 @@ export function parseWrapperArgs(argv: string[], cwd = process.cwd()): WrapperOp
     throw new Error(`Unknown argument: ${arg}`);
   }
 
+  if (codexMode && claudeMode) {
+    throw new Error("--codex and --claude cannot be used together");
+  }
+
+  let shortcutModelCommand: string | undefined;
+  if (codexMode) {
+    shortcutModelCommand = `codex exec - --color never --skip-git-repo-check -C ${shellQuote(projectPath)}`;
+  } else if (claudeMode) {
+    shortcutModelCommand = "claude -p --output-format text";
+  }
+
   return {
     projectPath,
     sessionId,
     maxItems,
     tokenBudget,
-    modelCommand:
-      modelCommand ??
-      (codexMode
-        ? `codex exec - --color never --skip-git-repo-check -C ${shellQuote(projectPath)}`
-        : undefined),
+    modelCommand: modelCommand ?? shortcutModelCommand,
   };
 }
 
@@ -211,6 +224,7 @@ function helpText(): string {
     "  --token-budget <n>      Approx token budget for context (default: 1200)",
     "  --model-command <cmd>   Command to execute with wrapped prompt on stdin",
     "  --codex                 Shortcut for: codex exec - --color never --skip-git-repo-check -C <project-path>",
+    "  --claude                Shortcut for: claude -p --output-format text",
     "  -h, --help              Show this help text",
     "",
     "Turn behavior (enforced):",

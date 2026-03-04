@@ -44,6 +44,18 @@ describe("wrapper args", () => {
     expect(parsed.modelCommand).toContain("-C");
     expect(parsed.modelCommand).toContain("/tmp/repo-with spaces");
   });
+
+  it("expands --claude into a Claude Code print-mode command", () => {
+    const parsed = parseWrapperArgs(["--claude"]);
+
+    expect(parsed.modelCommand).toBe("claude -p --output-format text");
+  });
+
+  it("rejects enabling both --codex and --claude", () => {
+    expect(() => parseWrapperArgs(["--codex", "--claude"])).toThrow(
+      "--codex and --claude cannot be used together",
+    );
+  });
 });
 
 describe("composeWrappedPrompt", () => {
