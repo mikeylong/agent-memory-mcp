@@ -7,7 +7,8 @@
   "bin": {
     "agent-memory-mcp": "dist/index.js",
     "agent-memory-wrapper": "dist/wrapper.js",
-    "agent-memory-import-codex": "dist/importCodexSession.js"
+    "agent-memory-import-codex": "dist/importCodexSession.js",
+    "agent-memory-import-chatgpt": "dist/importChatgptExport.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && mkdir -p dist/db && cp -R src/db/schema dist/db/",
@@ -15,6 +16,7 @@
     "privacy:scan": "bash scripts/privacy-scan.sh",
     "wrapper": "tsx src/wrapper.ts",
     "import:codex-session": "tsx src/importCodexSession.ts",
+    "import:chatgpt-export": "tsx src/importChatgptExport.ts",
     "wrapper:codex": "tsx src/wrapper.ts --codex",
     "start": "node dist/index.js",
     "test": "vitest run",

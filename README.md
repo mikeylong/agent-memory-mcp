@@ -168,6 +168,25 @@ node dist/importCodexSession.js \
   --max-facts 25
 ```
 
+### Import ChatGPT data export
+
+```bash
+node dist/importChatgptExport.js \
+  --export-zip "$HOME/Downloads/ChatGPT Data Download.zip" \
+  --capture-scope global \
+  --branch-strategy active \
+  --coverage all \
+  --max-facts 5
+```
+
+Dry-run preview (no writes):
+
+```bash
+node dist/importChatgptExport.js \
+  --export-zip "$HOME/Downloads/ChatGPT Data Download.zip" \
+  --dry-run
+```
+
 ## Limitations and Failure Modes
 
 - Embeddings are optional; if unavailable, retrieval falls back to lexical ranking.
