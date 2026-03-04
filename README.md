@@ -7,7 +7,7 @@ It stores memory in SQLite on your machine and exposes retrieval/write tools ove
 
 ## Why It Exists
 
-When you switch between agents (for example Codex and Claude Desktop), context gets lost.
+When you switch between agents (for example Codex, Claude Desktop, and Claude Code), context gets lost.
 This project keeps important context local and reusable so each new chat does not start from zero.
 
 ## Who Should Use It
@@ -102,6 +102,9 @@ Use the same `AGENT_MEMORY_HOME` across clients so memory is shared.
 }
 ```
 
+Use the same server entry for Codex, Claude Desktop, and Claude Code.
+The key requirement is sharing one `AGENT_MEMORY_HOME` path across all clients.
+
 ### 4. Sanity-check health
 
 Call `memory_health` from your MCP client. Expected shape:
@@ -126,10 +129,10 @@ Example `memory_upsert` payload:
 }
 ```
 
-## Cross-Agent Verification (Codex <-> Claude)
+## Cross-Agent Verification (Codex <-> Claude Desktop / Claude Code)
 
 1. In Codex, call `memory_upsert` with project metadata path `$HOME/projects/agent-memory`.
-2. In Claude Desktop, call `memory_search` for the same content.
+2. In Claude Desktop or Claude Code, call `memory_search` for the same content.
 3. Confirm the same fact is returned in both clients.
 
 If you need explicit project scope id, hash the absolute path:
@@ -157,6 +160,11 @@ Shortcut:
 ```bash
 scripts/codex-memory.sh "$HOME/projects/agent-memory" my-session
 ```
+
+### Claude Code mode
+
+Configure Claude Code with the same `agent-memory` MCP server entry from Quick Start.
+Point `AGENT_MEMORY_HOME` to the same shared folder so Claude Code reads/writes the same local memory DB.
 
 ### Import existing Codex sessions
 
