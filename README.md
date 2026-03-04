@@ -5,6 +5,8 @@
 Default data path: `$HOME/.agent-memory/memory.db`.
 Use the same `AGENT_MEMORY_HOME` across clients so Codex/Claude share one memory store.
 
+`memory_search` is client-adaptive by default. Users should not need to prompt for `memory_search_compact` in normal workflows.
+
 ## Quick Start (Shortcuts)
 
 ### 1) Install
@@ -40,6 +42,18 @@ scripts/claude-memory.sh "$HOME/projects/agent-memory"
 ```
 
 `session_id` is optional in shortcut scripts. If omitted, one is auto-generated.
+
+## Client Behavior
+
+Use `memory_search` normally. The server shapes payload size by client type:
+
+| Client | `memory_search` behavior |
+|---|---|
+| Claude Desktop | Hard-clamped safe payload caps (`limit<=12`, `max_content_chars<=700`, `max_response_bytes<=180000`) |
+| Claude Code / Codex | Rich defaults (no forced compact caps) |
+| Unknown clients | Adaptive retry: rich first, compact-safe fallback when envelope is too large |
+
+`memory_search_compact` remains available as an optional fallback endpoint for strict payload-limit environments.
 
 ### 3b) Make Claude Code use wrapper by default
 
@@ -164,6 +178,14 @@ agent-memory-import-claude --session-file "$HOME/.claude/projects/<workspace-slu
 npm run import:codex:latest -- --project-path "$HOME/projects/agent-memory"
 npm run import:claude:latest -- --project-path "$HOME/projects/agent-memory"
 ```
+
+### Optional client-class override (testing/ops)
+
+```bash
+AGENT_MEMORY_CLIENT_CLASS_OVERRIDE=constrained node dist/index.js
+```
+
+Allowed values: `auto` (default), `rich`, `constrained`, `unknown`.
 
 ## Limitations
 

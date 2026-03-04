@@ -15,6 +15,14 @@ interface ClientFixture {
   dbPath: string;
 }
 
+interface ClientFixtureOptions {
+  envOverrides?: Record<string, string>;
+  clientInfo?: {
+    name: string;
+    version: string;
+  };
+}
+
 const cleanups: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
@@ -45,7 +53,13 @@ function sanitizeEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   );
 }
 
-async function createClientFixture(envOverrides: Record<string, string>): Promise<ClientFixture> {
+async function createClientFixture(options: ClientFixtureOptions = {}): Promise<ClientFixture> {
+  const envOverrides = options.envOverrides ?? {};
+  const clientInfo = options.clientInfo ?? {
+    name: "agent-memory-mcp-test-client",
+    version: "0.1.0",
+  };
+
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-memory-mcp-int-"));
   const dbPath = path.join(tempDir, "memory.db");
   const root = process.cwd();
@@ -68,10 +82,7 @@ async function createClientFixture(envOverrides: Record<string, string>): Promis
     stderr: "pipe",
   });
 
-  const client = new Client({
-    name: "agent-memory-mcp-test-client",
-    version: "0.1.0",
-  });
+  const client = new Client(clientInfo);
 
   await client.connect(transport);
 
@@ -84,6 +95,30 @@ async function createClientFixture(envOverrides: Record<string, string>): Promis
       await fs.rm(tempDir, { recursive: true, force: true });
     },
   };
+}
+
+async function seedMarkerMemories(args: {
+  fixture: ClientFixture;
+  marker: string;
+  count: number;
+  contentRepeat: number;
+  metadataRepeat?: number;
+}): Promise<void> {
+  for (let i = 0; i < args.count; i += 1) {
+    await args.fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "global" },
+        content: `${args.marker} entry ${i} ${"x".repeat(args.contentRepeat)}`,
+        metadata:
+          args.metadataRepeat !== undefined
+            ? {
+                note: `${args.marker}-meta-${i}-${"m".repeat(args.metadataRepeat)}`,
+              }
+            : undefined,
+      },
+    });
+  }
 }
 
 async function startMockOllama(): Promise<{ url: string; close: () => Promise<void> }> {
@@ -148,7 +183,9 @@ async function startMockOllama(): Promise<{ url: string; close: () => Promise<vo
 describe("agent-memory-mcp integration", () => {
   it("registers tools and enforces schema validation", async () => {
     const fixture = await createClientFixture({
-      AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
     });
     cleanups.push(fixture.cleanup);
 
@@ -198,7 +235,9 @@ describe("agent-memory-mcp integration", () => {
 
   it("supports upsert -> search -> get_context workflow", async () => {
     const fixture = await createClientFixture({
-      AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
     });
     cleanups.push(fixture.cleanup);
     const projectPath = "/tmp/project-abc";
@@ -248,7 +287,9 @@ describe("agent-memory-mcp integration", () => {
 
   it("supports bounded memory_search payloads for strict clients", async () => {
     const fixture = await createClientFixture({
-      AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
     });
     cleanups.push(fixture.cleanup);
 
@@ -279,9 +320,135 @@ describe("agent-memory-mcp integration", () => {
     expect(bytes).toBeLessThanOrEqual(5000);
   });
 
+  it("hard-clamps memory_search for constrained clients", async () => {
+    const fixture = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
+      clientInfo: {
+        name: "Claude Desktop",
+        version: "1.0.0",
+      },
+    });
+    cleanups.push(fixture.cleanup);
+
+    await seedMarkerMemories({
+      fixture,
+      marker: "desktop-clamp marker",
+      count: 20,
+      contentRepeat: 12000,
+      metadataRepeat: 2000,
+    });
+
+    const searchResult = await fixture.client.callTool({
+      name: "memory_search",
+      arguments: {
+        query: "desktop-clamp marker",
+        scopes: [{ type: "global" }],
+        limit: 200,
+        include_metadata: true,
+        max_content_chars: 50000,
+        max_response_bytes: 900000,
+      },
+    });
+
+    const payload = parseToolPayload(searchResult as any);
+    const bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+
+    expect(payload.items.length).toBeGreaterThan(0);
+    expect(payload.items.length).toBeLessThanOrEqual(12);
+    expect(payload.items[0].content.length).toBeLessThanOrEqual(900);
+    expect(payload.items[0].metadata).toBeUndefined();
+    expect(bytes).toBeLessThanOrEqual(180000);
+  });
+
+  it("keeps memory_search rich behavior for Claude Code clients", async () => {
+    const fixture = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
+      clientInfo: {
+        name: "Claude Code",
+        version: "1.0.0",
+      },
+    });
+    cleanups.push(fixture.cleanup);
+
+    await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "global" },
+        content: `claude-code-rich marker ${"q".repeat(6000)}`,
+        metadata: {
+          source_agent: "claude-code",
+          project_path: "/tmp/project-rich",
+        },
+      },
+    });
+
+    const searchResult = await fixture.client.callTool({
+      name: "memory_search",
+      arguments: {
+        query: "claude-code-rich marker",
+        scopes: [{ type: "global" }],
+        include_metadata: true,
+      },
+    });
+
+    const payload = parseToolPayload(searchResult as any);
+
+    expect(payload.items.length).toBeGreaterThan(0);
+    expect(payload.items[0].content.length).toBeGreaterThan(900);
+    expect(payload.items[0].metadata).toBeTypeOf("object");
+  });
+
+  it("uses adaptive fallback for unknown clients when envelope is too large", async () => {
+    const fixture = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
+      clientInfo: {
+        name: "my-unknown-client",
+        version: "9.9.9",
+      },
+    });
+    cleanups.push(fixture.cleanup);
+
+    await seedMarkerMemories({
+      fixture,
+      marker: "unknown-fallback marker",
+      count: 36,
+      contentRepeat: 25000,
+      metadataRepeat: 3000,
+    });
+
+    const searchResult = await fixture.client.callTool({
+      name: "memory_search",
+      arguments: {
+        query: "unknown-fallback marker",
+        scopes: [{ type: "global" }],
+        limit: 200,
+        include_metadata: true,
+        max_content_chars: 50000,
+        max_response_bytes: 900000,
+      },
+    });
+
+    const payload = parseToolPayload(searchResult as any);
+    const bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+
+    expect(payload.items.length).toBeGreaterThan(0);
+    expect(payload.items.length).toBeLessThanOrEqual(12);
+    expect(payload.items[0].content.length).toBeLessThanOrEqual(900);
+    expect(payload.items[0].metadata).toBeUndefined();
+    expect(bytes).toBeLessThanOrEqual(180000);
+  });
+
   it("provides compact search defaults for strict clients", async () => {
     const fixture = await createClientFixture({
-      AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
     });
     cleanups.push(fixture.cleanup);
 
@@ -313,7 +480,9 @@ describe("agent-memory-mcp integration", () => {
     const mock = await startMockOllama();
 
     const healthyFixture = await createClientFixture({
-      AGENT_MEMORY_OLLAMA_URL: mock.url,
+      envOverrides: {
+        AGENT_MEMORY_OLLAMA_URL: mock.url,
+      },
     });
     cleanups.push(async () => {
       await healthyFixture.cleanup();
@@ -332,7 +501,9 @@ describe("agent-memory-mcp integration", () => {
     expect(healthyPayload.actions).toEqual([]);
 
     const degradedFixture = await createClientFixture({
-      AGENT_MEMORY_OLLAMA_URL: "http://127.0.0.1:9",
+      envOverrides: {
+        AGENT_MEMORY_OLLAMA_URL: "http://127.0.0.1:9",
+      },
     });
     cleanups.push(degradedFixture.cleanup);
 
@@ -362,7 +533,9 @@ describe("agent-memory-mcp integration", () => {
 
   it("supports cross-agent metadata and concurrent reads/writes", async () => {
     const fixture = await createClientFixture({
-      AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
     });
     cleanups.push(fixture.cleanup);
 

@@ -1,6 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { MemoryService } from "../memoryService.js";
+import { SearchInput } from "../types.js";
+import { resolveClientClassFromServer } from "./clientPolicy.js";
+import {
+  buildEffectiveSearchInput,
+  estimateToolEnvelopeBytes,
+  shouldFallbackUnknown,
+} from "./searchPolicy.js";
 import { scopeSelectorSchema, toolJsonResult } from "./common.js";
 
 export function registerSearchTool(server: McpServer, memory: MemoryService): void {
@@ -19,8 +26,9 @@ export function registerSearchTool(server: McpServer, memory: MemoryService): vo
         max_response_bytes: z.number().int().min(1000).max(900000).optional(),
       },
     },
-    async (input) => {
-      const result = await memory.search({
+    async (input, _extra) => {
+      const clientClass = resolveClientClassFromServer(server);
+      const rawSearchInput: SearchInput = {
         query: input.query,
         scopes: input.scopes,
         limit: input.limit,
@@ -28,7 +36,15 @@ export function registerSearchTool(server: McpServer, memory: MemoryService): vo
         include_metadata: input.include_metadata,
         max_content_chars: input.max_content_chars,
         max_response_bytes: input.max_response_bytes,
-      });
+      };
+
+      const primaryInput = buildEffectiveSearchInput(rawSearchInput, clientClass, "primary");
+      let result = await memory.search(primaryInput);
+
+      if (shouldFallbackUnknown(clientClass, estimateToolEnvelopeBytes(result))) {
+        const fallbackInput = buildEffectiveSearchInput(rawSearchInput, clientClass, "fallback");
+        result = await memory.search(fallbackInput);
+      }
 
       return toolJsonResult(result);
     },

@@ -9,7 +9,7 @@ export function registerSearchCompactTool(server: McpServer, memory: MemoryServi
     {
       title: "Search Memory (Compact)",
       description:
-        "Search memories with compact, UI-safe defaults that avoid oversized tool payloads.",
+        "Optional compact memory search with UI-safe defaults for strict payload-limit clients.",
       inputSchema: {
         query: z.string().default(""),
         scopes: z.array(scopeSelectorSchema).optional(),
