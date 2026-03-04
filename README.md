@@ -35,9 +35,20 @@ Use this MCP server entry in your client config:
 ### 3) Start enforced memory wrappers
 
 ```bash
-scripts/codex-memory.sh "$HOME/projects/agent-memory" my-session
-scripts/claude-memory.sh "$HOME/projects/agent-memory" my-session
+scripts/codex-memory.sh "$HOME/projects/agent-memory"
+scripts/claude-memory.sh "$HOME/projects/agent-memory"
 ```
+
+`session_id` is optional in shortcut scripts. If omitted, one is auto-generated.
+
+### 3b) Make Claude Code use wrapper by default
+
+```bash
+npm run enable:claude-wrapper
+source ~/.zshrc
+```
+
+After this, running `claude` starts through the memory wrapper automatically.
 
 ### 4) Import latest sessions (auto-discovery)
 
@@ -58,8 +69,10 @@ Call `memory_health` from your MCP client. Expected shape:
 
 | Task | Command |
 |---|---|
-| Start Codex with enforced memory | `scripts/codex-memory.sh "$HOME/projects/agent-memory" my-session` |
-| Start Claude Code with enforced memory | `scripts/claude-memory.sh "$HOME/projects/agent-memory" my-session` |
+| Start Codex with enforced memory | `scripts/codex-memory.sh "$HOME/projects/agent-memory"` |
+| Start Claude Code with enforced memory | `scripts/claude-memory.sh "$HOME/projects/agent-memory"` |
+| Make `claude` default to wrapper | `npm run enable:claude-wrapper && source ~/.zshrc` |
+| Start Claude chat (after enable) | `claude` |
 | Import latest Codex session | `scripts/import-codex-session.sh --project-path "$HOME/projects/agent-memory"` |
 | Import latest Claude session | `scripts/import-claude-session.sh --project-path "$HOME/projects/agent-memory"` |
 | Import a specific Codex session file | `scripts/import-codex-session.sh --session-file "$HOME/.codex/sessions/YYYY/MM/DD/rollout-<id>.jsonl" --project-path "$HOME/projects/agent-memory"` |
@@ -94,6 +107,8 @@ node dist/index.js
 node dist/wrapper.js --codex --project-path "$HOME/projects/agent-memory" --session-id my-session
 node dist/wrapper.js --claude --project-path "$HOME/projects/agent-memory" --session-id my-session
 ```
+
+`my-session` above is an example session id label. Use any string you want, or omit `--session-id` when using shortcut scripts.
 
 ### Raw importer commands
 
