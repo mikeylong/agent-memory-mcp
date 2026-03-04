@@ -74,6 +74,48 @@ function tokenEstimate(content: string): number {
   return Math.ceil(content.length / 4) + 20;
 }
 
+const DEFAULT_SEARCH_CONTENT_MAX_CHARS = 1200;
+const MAX_SEARCH_CONTENT_MAX_CHARS = 50000;
+const MIN_SEARCH_CONTENT_MAX_CHARS = 120;
+const DEFAULT_SEARCH_RESPONSE_BYTES = 220000;
+const MIN_SEARCH_RESPONSE_BYTES = 1000;
+const MAX_SEARCH_RESPONSE_BYTES = 900000;
+
+function normalizeSearchContentMaxChars(value?: number): number {
+  if (value === undefined || !Number.isFinite(value)) {
+    return DEFAULT_SEARCH_CONTENT_MAX_CHARS;
+  }
+
+  return Math.max(
+    MIN_SEARCH_CONTENT_MAX_CHARS,
+    Math.min(MAX_SEARCH_CONTENT_MAX_CHARS, Math.trunc(value)),
+  );
+}
+
+function normalizeSearchResponseBytes(value?: number): number {
+  if (value === undefined || !Number.isFinite(value)) {
+    return DEFAULT_SEARCH_RESPONSE_BYTES;
+  }
+
+  return Math.max(
+    MIN_SEARCH_RESPONSE_BYTES,
+    Math.min(MAX_SEARCH_RESPONSE_BYTES, Math.trunc(value)),
+  );
+}
+
+function truncateSearchContent(content: string, maxChars: number): string {
+  if (content.length <= maxChars) {
+    return content;
+  }
+
+  const suffix = `\n… [truncated ${content.length - maxChars} chars]`;
+  return `${content.slice(0, maxChars).trimEnd()}${suffix}`;
+}
+
+function estimateJsonBytes(payload: unknown): number {
+  return Buffer.byteLength(JSON.stringify(payload), "utf8");
+}
+
 function toMemoryItem(row: MemoryRow, includeMetadata: boolean): MemoryItem {
   return {
     id: row.id,
@@ -701,8 +743,46 @@ export class MemoryService {
 
   async search(input: SearchInput): Promise<{ items: MemoryItem[]; total: number }> {
     const result = await this.searchInternal(input);
+    const contentMaxChars = normalizeSearchContentMaxChars(input.max_content_chars);
+    const maxResponseBytes = normalizeSearchResponseBytes(input.max_response_bytes);
+    const responseOverheadBytes = estimateJsonBytes({ items: [], total: result.total });
+
+    const shapedItems: MemoryItem[] = [];
+    let consumedBytes = responseOverheadBytes;
+
+    for (const rawItem of result.items) {
+      const candidate: MemoryItem = {
+        ...rawItem,
+        content: truncateSearchContent(rawItem.content, contentMaxChars),
+      };
+
+      let candidateBytes = estimateJsonBytes(candidate);
+      if (consumedBytes + candidateBytes > maxResponseBytes) {
+        if (shapedItems.length > 0) {
+          continue;
+        }
+
+        // Always try to return at least one match by applying an aggressive one-time truncation.
+        const fallbackChars = Math.max(MIN_SEARCH_CONTENT_MAX_CHARS, Math.floor(contentMaxChars / 4));
+        const fallbackCandidate: MemoryItem = {
+          ...candidate,
+          content: truncateSearchContent(rawItem.content, fallbackChars),
+        };
+        candidateBytes = estimateJsonBytes(fallbackCandidate);
+        if (consumedBytes + candidateBytes > maxResponseBytes) {
+          continue;
+        }
+        shapedItems.push(fallbackCandidate);
+        consumedBytes += candidateBytes;
+        continue;
+      }
+
+      shapedItems.push(candidate);
+      consumedBytes += candidateBytes;
+    }
+
     return {
-      items: result.items,
+      items: shapedItems,
       total: result.total,
     };
   }

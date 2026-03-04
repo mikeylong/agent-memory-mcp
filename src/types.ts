@@ -40,6 +40,8 @@ export interface SearchInput {
   limit?: number;
   min_score?: number;
   include_metadata?: boolean;
+  max_content_chars?: number;
+  max_response_bytes?: number;
 }
 
 export interface GetContextInput {

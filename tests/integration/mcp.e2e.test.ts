@@ -159,6 +159,7 @@ describe("agent-memory-mcp integration", () => {
       expect.arrayContaining([
         "memory_get_context",
         "memory_search",
+        "memory_search_compact",
         "memory_upsert",
         "memory_capture",
         "memory_delete",
@@ -231,6 +232,69 @@ describe("agent-memory-mcp integration", () => {
     expect(contextPayload.items.length).toBeGreaterThan(0);
     expect(typeof contextPayload.summary).toBe("string");
     expect(contextPayload.scores).toBeTypeOf("object");
+  });
+
+  it("supports bounded memory_search payloads for strict clients", async () => {
+    const fixture = await createClientFixture({
+      AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+    });
+    cleanups.push(fixture.cleanup);
+
+    await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "global" },
+        content: `payload-size marker ${"z".repeat(30000)}`,
+      },
+    });
+
+    const searchResult = await fixture.client.callTool({
+      name: "memory_search",
+      arguments: {
+        query: "payload-size marker",
+        scopes: [{ type: "global" }],
+        limit: 5,
+        max_content_chars: 600,
+        max_response_bytes: 5000,
+      },
+    });
+
+    const payload = parseToolPayload(searchResult as any);
+    const bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+
+    expect(payload.items.length).toBeGreaterThan(0);
+    expect(payload.items[0].content).toContain("[truncated");
+    expect(bytes).toBeLessThanOrEqual(5000);
+  });
+
+  it("provides compact search defaults for strict clients", async () => {
+    const fixture = await createClientFixture({
+      AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+    });
+    cleanups.push(fixture.cleanup);
+
+    await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "global" },
+        content: `compact-tool marker ${"q".repeat(25000)}`,
+      },
+    });
+
+    const compactResult = await fixture.client.callTool({
+      name: "memory_search_compact",
+      arguments: {
+        query: "compact-tool marker",
+        scopes: [{ type: "global" }],
+      },
+    });
+
+    const payload = parseToolPayload(compactResult as any);
+    const bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+
+    expect(payload.items.length).toBeGreaterThan(0);
+    expect(payload.items[0].content.length).toBeLessThanOrEqual(900);
+    expect(bytes).toBeLessThanOrEqual(180000);
   });
 
   it("reports embeddings available and degraded states", async () => {

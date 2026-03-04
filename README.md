@@ -40,11 +40,19 @@ Core scopes in plain language:
 
 - `memory_get_context`: return a ranked context bundle for a prompt.
 - `memory_search`: raw retrieval for agent reasoning.
+- `memory_search_compact`: retrieval with compact defaults for strict UI payload limits.
 - `memory_upsert`: explicit write/update.
 - `memory_capture`: extract durable facts from transcript-like text.
 - `memory_delete`: delete one memory entry.
 - `memory_forget_scope`: bulk-delete by scope.
 - `memory_health`: operational status.
+
+`memory_search` also supports optional response-shaping controls for strict clients:
+
+- `max_content_chars`: truncate each returned item's `content` (default `1200`).
+- `max_response_bytes`: cap the JSON payload size (default `220000`).
+
+If your client has strict tool output caps, prefer `memory_search_compact` first.
 
 ## Privacy and Security Model
 

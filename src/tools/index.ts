@@ -6,11 +6,13 @@ import { registerForgetScopeTool } from "./forgetScope.js";
 import { registerGetContextTool } from "./getContext.js";
 import { registerHealthTool } from "./health.js";
 import { registerSearchTool } from "./search.js";
+import { registerSearchCompactTool } from "./searchCompact.js";
 import { registerUpsertTool } from "./upsert.js";
 
 export function registerMemoryTools(server: McpServer, memory: MemoryService): void {
   registerGetContextTool(server, memory);
   registerSearchTool(server, memory);
+  registerSearchCompactTool(server, memory);
   registerUpsertTool(server, memory);
   registerCaptureTool(server, memory);
   registerDeleteTool(server, memory);

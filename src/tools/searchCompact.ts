@@ -3,31 +3,29 @@ import * as z from "zod/v4";
 import { MemoryService } from "../memoryService.js";
 import { scopeSelectorSchema, toolJsonResult } from "./common.js";
 
-export function registerSearchTool(server: McpServer, memory: MemoryService): void {
+export function registerSearchCompactTool(server: McpServer, memory: MemoryService): void {
   server.registerTool(
-    "memory_search",
+    "memory_search_compact",
     {
-      title: "Search Memory",
-      description: "Search memories using lexical and semantic ranking.",
+      title: "Search Memory (Compact)",
+      description:
+        "Search memories with compact, UI-safe defaults that avoid oversized tool payloads.",
       inputSchema: {
         query: z.string().default(""),
         scopes: z.array(scopeSelectorSchema).optional(),
-        limit: z.number().min(1).max(200).optional(),
+        limit: z.number().min(1).max(50).optional(),
         min_score: z.number().min(0).max(1).optional(),
-        include_metadata: z.boolean().optional(),
-        max_content_chars: z.number().int().min(120).max(50000).optional(),
-        max_response_bytes: z.number().int().min(1000).max(900000).optional(),
       },
     },
     async (input) => {
       const result = await memory.search({
         query: input.query,
         scopes: input.scopes,
-        limit: input.limit,
+        limit: input.limit ?? 12,
         min_score: input.min_score,
-        include_metadata: input.include_metadata,
-        max_content_chars: input.max_content_chars,
-        max_response_bytes: input.max_response_bytes,
+        include_metadata: false,
+        max_content_chars: 700,
+        max_response_bytes: 180000,
       });
 
       return toolJsonResult(result);
