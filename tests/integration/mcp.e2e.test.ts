@@ -182,6 +182,18 @@ describe("agent-memory-mcp integration", () => {
     );
 
     expect(invalid.isError).toBe(true);
+
+    const health = await fixture.client.callTool({
+      name: "memory_health",
+      arguments: {},
+    });
+    const healthPayload = parseToolPayload(health as any);
+    expect(healthPayload.embeddings).toBe("degraded");
+    expect(healthPayload.embeddings_provider).toBe("disabled");
+    expect(healthPayload.embeddings_reason).toBe("disabled_by_config");
+    expect(healthPayload.retrieval_mode).toBe("lexical-only");
+    expect(Array.isArray(healthPayload.actions)).toBe(true);
+    expect(healthPayload.actions.length).toBeGreaterThan(0);
   });
 
   it("supports upsert -> search -> get_context workflow", async () => {
@@ -314,6 +326,10 @@ describe("agent-memory-mcp integration", () => {
     });
     const healthyPayload = parseToolPayload(healthy as any);
     expect(healthyPayload.embeddings).toBe("ok");
+    expect(healthyPayload.retrieval_mode).toBe("semantic+lexical");
+    expect(healthyPayload.embeddings_provider).toBe("ollama");
+    expect(healthyPayload.embeddings_reason).toBe("healthy");
+    expect(healthyPayload.actions).toEqual([]);
 
     const degradedFixture = await createClientFixture({
       AGENT_MEMORY_OLLAMA_URL: "http://127.0.0.1:9",
@@ -326,6 +342,11 @@ describe("agent-memory-mcp integration", () => {
     });
     const degradedPayload = parseToolPayload(degraded as any);
     expect(degradedPayload.embeddings).toBe("degraded");
+    expect(degradedPayload.retrieval_mode).toBe("lexical-only");
+    expect(degradedPayload.embeddings_provider).toBe("ollama");
+    expect(degradedPayload.embeddings_reason).toBe("provider_unreachable");
+    expect(Array.isArray(degradedPayload.actions)).toBe(true);
+    expect(degradedPayload.actions.length).toBeGreaterThan(0);
 
     const upsert = await degradedFixture.client.callTool({
       name: "memory_upsert",

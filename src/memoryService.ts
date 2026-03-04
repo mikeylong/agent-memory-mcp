@@ -46,6 +46,23 @@ interface SearchInternalResult {
   scores: Record<string, number>;
 }
 
+export type EmbeddingsHealthState = "ok" | "degraded";
+export type RetrievalMode = "semantic+lexical" | "lexical-only";
+export type EmbeddingsProviderKind = "ollama" | "disabled";
+export type EmbeddingsReason = "healthy" | "disabled_by_config" | "provider_unreachable";
+
+export interface MemoryHealthStatus {
+  [key: string]: unknown;
+  ok: boolean;
+  db: "ok" | "error";
+  embeddings: EmbeddingsHealthState;
+  version: string;
+  retrieval_mode: RetrievalMode;
+  embeddings_provider: EmbeddingsProviderKind;
+  embeddings_reason: EmbeddingsReason;
+  actions: string[];
+}
+
 function parseJson<T>(value: string | null, fallback: T): T {
   if (!value) {
     return fallback;
@@ -149,6 +166,26 @@ function normalizeFtsQuery(input: string): string {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function healthActions(reason: EmbeddingsReason): string[] {
+  if (reason === "healthy") {
+    return [];
+  }
+
+  if (reason === "disabled_by_config") {
+    return [
+      "Embeddings are intentionally disabled via AGENT_MEMORY_DISABLE_EMBEDDINGS. Unset it to re-enable semantic retrieval.",
+      "Start Ollama and ensure AGENT_MEMORY_OLLAMA_URL points to a reachable endpoint (default: http://127.0.0.1:11434).",
+      "Ensure AGENT_MEMORY_EMBED_MODEL is available in Ollama (default: nomic-embed-text).",
+    ];
+  }
+
+  return [
+    "Start Ollama and ensure AGENT_MEMORY_OLLAMA_URL points to a reachable endpoint (default: http://127.0.0.1:11434).",
+    "Ensure AGENT_MEMORY_EMBED_MODEL is available in Ollama (default: nomic-embed-text).",
+    "Set AGENT_MEMORY_DISABLE_EMBEDDINGS=1 to run intentionally in lexical-only mode.",
+  ];
 }
 
 function expiresAtFromTtl(now: Date, ttlDays?: number): string | null {
@@ -899,12 +936,7 @@ export class MemoryService {
     };
   }
 
-  async health(): Promise<{
-    ok: boolean;
-    db: "ok" | "error";
-    embeddings: "ok" | "degraded";
-    version: string;
-  }> {
+  async health(): Promise<MemoryHealthStatus> {
     let dbState: "ok" | "error" = "ok";
     try {
       this.db.prepare("SELECT 1").get();
@@ -912,7 +944,7 @@ export class MemoryService {
       dbState = "error";
     }
 
-    let embeddingState: "ok" | "degraded" = this.embeddingsState;
+    let embeddingState: EmbeddingsHealthState = this.embeddingsState;
     if (this.embeddingsProvider.enabled) {
       const healthy = await this.embeddingsProvider.checkHealth();
       embeddingState = healthy ? "ok" : "degraded";
@@ -921,11 +953,28 @@ export class MemoryService {
       embeddingState = "degraded";
     }
 
+    const embeddingsProvider: EmbeddingsProviderKind =
+      this.embeddingsProvider.enabled && this.embeddingsProvider.name === "ollama"
+        ? "ollama"
+        : "disabled";
+    const embeddingsReason: EmbeddingsReason =
+      !this.embeddingsProvider.enabled
+        ? "disabled_by_config"
+        : embeddingState === "ok"
+          ? "healthy"
+          : "provider_unreachable";
+    const retrievalMode: RetrievalMode =
+      embeddingState === "ok" ? "semantic+lexical" : "lexical-only";
+
     return {
       ok: dbState === "ok",
       db: dbState,
       embeddings: embeddingState,
       version: `${this.version} (schema ${getLatestSchemaVersion()})`,
+      retrieval_mode: retrievalMode,
+      embeddings_provider: embeddingsProvider,
+      embeddings_reason: embeddingsReason,
+      actions: healthActions(embeddingsReason),
     };
   }
 }

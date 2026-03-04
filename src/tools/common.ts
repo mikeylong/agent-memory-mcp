@@ -9,7 +9,7 @@ export const scopeRefSchema = z.object({
 
 export const scopeSelectorSchema = scopeRefSchema;
 
-export function toolJsonResult(payload: Record<string, unknown>) {
+export function toolJsonResult<T extends object>(payload: T) {
   return {
     content: [
       {

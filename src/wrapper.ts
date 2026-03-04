@@ -8,7 +8,7 @@ import { loadConfig } from "./config.js";
 import { MemoryDb } from "./db/client.js";
 import { DisabledEmbeddingsProvider, EmbeddingsProvider } from "./embeddings/provider.js";
 import { OllamaEmbeddingsProvider } from "./embeddings/ollama.js";
-import { MemoryService } from "./memoryService.js";
+import { MemoryService, type MemoryHealthStatus } from "./memoryService.js";
 
 export interface WrapperOptions {
   projectPath: string;
@@ -168,6 +168,29 @@ export function composeWrappedPrompt(args: {
   return lines.join("\n");
 }
 
+export function composeEmbeddingsStartupNotice(
+  health: Pick<MemoryHealthStatus, "embeddings_reason" | "actions">,
+): string | null {
+  if (health.embeddings_reason === "healthy") {
+    return null;
+  }
+
+  if (health.embeddings_reason === "disabled_by_config") {
+    return [
+      "Embeddings mode: lexical-only (disabled by configuration).",
+      "Unset AGENT_MEMORY_DISABLE_EMBEDDINGS to re-enable semantic retrieval.",
+    ].join("\n");
+  }
+
+  const actionLines = health.actions.map((action, index) => `${index + 1}. ${action}`);
+
+  return [
+    "Warning: semantic ranking is unavailable; continuing in lexical-only retrieval mode.",
+    "Next steps:",
+    ...actionLines,
+  ].join("\n");
+}
+
 async function runModelCommand(command: string, wrappedPrompt: string): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
     const child = spawn(command, {
@@ -283,21 +306,27 @@ export async function startWrapper(rawArgv = process.argv.slice(2)): Promise<voi
   }
 
   const memory = new MemoryService(db, embeddings, `${config.version}-wrapper`);
+  const health = await memory.health();
+  const embeddingsNotice = composeEmbeddingsStartupNotice(health);
 
   const rl = readline.createInterface({ input, output });
 
-  output.write(
-    [
-      `Memory wrapper started.`,
-      `project_path=${options.projectPath}`,
-      `session_id=${options.sessionId}`,
-      options.modelCommand
-        ? `model_command=${options.modelCommand}`
-        : "model_command=(manual assistant input mode)",
-      "Type /exit to quit.",
-      "",
-    ].join("\n"),
-  );
+  const startupLines = [
+    "Memory wrapper started.",
+    `project_path=${options.projectPath}`,
+    `session_id=${options.sessionId}`,
+    options.modelCommand
+      ? `model_command=${options.modelCommand}`
+      : "model_command=(manual assistant input mode)",
+    "Type /exit to quit.",
+  ];
+
+  if (embeddingsNotice) {
+    startupLines.push("", embeddingsNotice);
+  }
+  startupLines.push("");
+
+  output.write(startupLines.join("\n"));
 
   try {
     while (true) {

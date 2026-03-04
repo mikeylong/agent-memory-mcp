@@ -62,8 +62,26 @@ scripts/import-claude-session.sh --project-path "$HOME/projects/agent-memory"
 Call `memory_health` from your MCP client. Expected shape:
 
 ```json
-{ "ok": true, "db": "ok", "embeddings": "ok", "version": "0.1.0 (schema 1)" }
+{
+  "ok": true,
+  "db": "ok",
+  "embeddings": "ok",
+  "version": "0.1.0 (schema 1)",
+  "retrieval_mode": "semantic+lexical",
+  "embeddings_provider": "ollama",
+  "embeddings_reason": "healthy",
+  "actions": []
+}
 ```
+
+### 6) First-run embeddings behavior
+
+- `agent-memory-mcp` does **not** auto-install Ollama.
+- If Ollama is unavailable, the server still works in lexical-only mode and `memory_health` reports degraded embeddings with actionable `actions`.
+- To enable semantic embeddings:
+  - Start Ollama and ensure `AGENT_MEMORY_OLLAMA_URL` points to a reachable endpoint (default `http://127.0.0.1:11434`).
+  - Ensure `AGENT_MEMORY_EMBED_MODEL` is available in Ollama (default `nomic-embed-text`).
+- To run intentionally without embeddings, set `AGENT_MEMORY_DISABLE_EMBEDDINGS=1`.
 
 ## Common Tasks (Shortcuts)
 

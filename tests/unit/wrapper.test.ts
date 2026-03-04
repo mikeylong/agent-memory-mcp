@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { composeWrappedPrompt, parseWrapperArgs } from "../../src/wrapper.js";
+import {
+  composeEmbeddingsStartupNotice,
+  composeWrappedPrompt,
+  parseWrapperArgs,
+} from "../../src/wrapper.js";
 
 describe("wrapper args", () => {
   it("parses defaults", () => {
@@ -75,5 +79,40 @@ describe("composeWrappedPrompt", () => {
     expect(output).toContain("Use pnpm test in this repository.");
     expect(output).toContain("[User Prompt]");
     expect(output).toContain("How should we run tests?");
+  });
+});
+
+describe("composeEmbeddingsStartupNotice", () => {
+  it("returns warning text with actions when provider is unreachable", () => {
+    const output = composeEmbeddingsStartupNotice({
+      embeddings_reason: "provider_unreachable",
+      actions: [
+        "Start Ollama and ensure AGENT_MEMORY_OLLAMA_URL points to a reachable endpoint.",
+        "Ensure AGENT_MEMORY_EMBED_MODEL is available in Ollama.",
+      ],
+    });
+
+    expect(output).toContain("Warning: semantic ranking is unavailable");
+    expect(output).toContain("AGENT_MEMORY_OLLAMA_URL");
+    expect(output).toContain("AGENT_MEMORY_EMBED_MODEL");
+  });
+
+  it("returns informational text when embeddings are disabled by config", () => {
+    const output = composeEmbeddingsStartupNotice({
+      embeddings_reason: "disabled_by_config",
+      actions: [],
+    });
+
+    expect(output).toContain("Embeddings mode: lexical-only");
+    expect(output).toContain("AGENT_MEMORY_DISABLE_EMBEDDINGS");
+  });
+
+  it("returns null when embeddings are healthy", () => {
+    const output = composeEmbeddingsStartupNotice({
+      embeddings_reason: "healthy",
+      actions: [],
+    });
+
+    expect(output).toBeNull();
   });
 });
