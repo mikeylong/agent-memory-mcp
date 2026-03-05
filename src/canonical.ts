@@ -2,6 +2,8 @@ const NON_KEY_CHARS = /[^a-z0-9]+/g;
 const LEADING_TRAILING_UNDERSCORES = /^_+|_+$/g;
 const MULTIPLE_UNDERSCORES = /_+/g;
 const FAVORITE_LINE_PATTERN = /^\s*favorite\s+(.+?)\s*:\s*.+$/i;
+const CANONICAL_PREFERENCE_IS_PATTERN =
+  /^\s*canonical\s+user\s+preference\s*:\s*favorite\s+(.+?)\s+is\s+.+$/i;
 
 const TEMPORAL_QUERY_PATTERNS: RegExp[] = [
   /\bused to be\b/i,
@@ -37,16 +39,45 @@ export function normalizeCanonicalKey(input: string): string | undefined {
 }
 
 export function inferCanonicalKeyFromContent(content: string): string | undefined {
-  const match = content.match(FAVORITE_LINE_PATTERN);
-  if (!match || !match[1]) {
+  const favoriteLineMatch = content.match(FAVORITE_LINE_PATTERN);
+  if (favoriteLineMatch && favoriteLineMatch[1]) {
+    return normalizeCanonicalKey(`favorite ${favoriteLineMatch[1]}`);
+  }
+
+  const canonicalPreferenceMatch = content.match(CANONICAL_PREFERENCE_IS_PATTERN);
+  if (!canonicalPreferenceMatch || !canonicalPreferenceMatch[1]) {
     return undefined;
   }
 
-  return normalizeCanonicalKey(`favorite ${match[1]}`);
+  return normalizeCanonicalKey(`favorite ${canonicalPreferenceMatch[1]}`);
 }
 
 export function hasCanonicalTag(tags: string[]): boolean {
   return tags.some((tag) => tag.trim().toLowerCase() === "canonical");
+}
+
+export function hasPreferenceIntentTag(tags: string[]): boolean {
+  return tags.some((tag) => {
+    const normalized = tag.trim().toLowerCase();
+    return (
+      normalized === "favorite" ||
+      normalized === "user-preference" ||
+      normalized.includes("preference")
+    );
+  });
+}
+
+export function canonicalKeyFromIdempotencyKey(idempotencyKey?: string): string | undefined {
+  if (!idempotencyKey) {
+    return undefined;
+  }
+
+  const normalized = normalizeCanonicalKey(idempotencyKey);
+  if (!normalized || !normalized.startsWith("favorite_")) {
+    return undefined;
+  }
+
+  return normalized;
 }
 
 export function resolveCanonicalKey(args: {
@@ -62,7 +93,7 @@ export function resolveCanonicalKey(args: {
     }
   }
 
-  if (!hasCanonicalTag(args.tags)) {
+  if (!hasCanonicalTag(args.tags) && !hasPreferenceIntentTag(args.tags)) {
     return undefined;
   }
 

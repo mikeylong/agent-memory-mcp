@@ -16,6 +16,10 @@ const MIGRATIONS: Migration[] = [
     version: 2,
     fileName: "002_canonical_key.sql",
   },
+  {
+    version: 3,
+    fileName: "003_canonical_repair.sql",
+  },
 ];
 
 function readMigrationSql(fileName: string): string {

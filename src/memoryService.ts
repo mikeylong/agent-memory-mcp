@@ -2,6 +2,10 @@ import crypto from "node:crypto";
 import path from "node:path";
 import type { RunResult } from "better-sqlite3";
 import {
+  canonicalKeyFromIdempotencyKey,
+  hasCanonicalTag,
+  hasPreferenceIntentTag,
+  inferCanonicalKeyFromContent,
   isPreferenceQuery,
   normalizeCanonicalKey,
   isTemporalPreferenceQuery,
@@ -709,12 +713,16 @@ export class MemoryService {
 
     const hash = contentHash(redactedContent);
     const tags = cleanTags(input.tags);
-    const canonicalKey =
-      resolveCanonicalKeyForInput({
-        content: redactedContent,
-        tags,
-        metadata,
-      }) ?? null;
+    const metadataCanonicalKey =
+      typeof metadata.normalized_key === "string" ? normalizeCanonicalKey(metadata.normalized_key) : undefined;
+    const idempotencyCanonicalKey = hasPreferenceIntentTag(tags)
+      ? canonicalKeyFromIdempotencyKey(input.idempotency_key)
+      : undefined;
+    const contentCanonicalKey =
+      hasCanonicalTag(tags) || hasPreferenceIntentTag(tags)
+        ? inferCanonicalKeyFromContent(redactedContent)
+        : undefined;
+    const canonicalKey = metadataCanonicalKey ?? idempotencyCanonicalKey ?? contentCanonicalKey ?? null;
     const metadataForWrite = this.withCanonicalMetadata(metadata, canonicalKey);
     const importance = normalizeImportance(input.importance);
 
@@ -730,6 +738,24 @@ export class MemoryService {
     const sourceAgent =
       typeof metadataForWrite.source_agent === "string" ? metadataForWrite.source_agent : null;
 
+    const bindIdempotencyKey = (memoryId: string): void => {
+      if (!input.idempotency_key) {
+        return;
+      }
+
+      this.db
+        .prepare(
+          `
+            INSERT INTO idempotency_keys (key, memory_id, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+              memory_id = excluded.memory_id,
+              created_at = excluded.created_at
+          `,
+        )
+        .run(input.idempotency_key, memoryId, nowIsoValue);
+    };
+
     if (input.idempotency_key) {
       const existingByKey = this.db
         .prepare(
@@ -738,20 +764,26 @@ export class MemoryService {
             FROM idempotency_keys k
             JOIN memories m ON m.id = k.memory_id
             WHERE k.key = ?
-              AND m.deleted_at IS NULL
             LIMIT 1
           `,
         )
         .get(input.idempotency_key) as MemoryRow | undefined;
 
       if (existingByKey) {
-        return {
-          id: existingByKey.id,
-          created: false,
-          redacted: false,
-          expires_at: existingByKey.expires_at ?? undefined,
-          canonical_key: existingByKey.canonical_key ?? undefined,
-        };
+        const isActive = existingByKey.deleted_at === null;
+        const matchesScope =
+          existingByKey.scope_type === scope.type &&
+          (existingByKey.scope_id ?? null) === (scope.id ?? null);
+
+        if (isActive && matchesScope && existingByKey.content_hash === hash) {
+          return {
+            id: existingByKey.id,
+            created: false,
+            redacted: redaction.redacted,
+            expires_at: existingByKey.expires_at ?? undefined,
+            canonical_key: existingByKey.canonical_key ?? undefined,
+          };
+        }
       }
     }
 
@@ -812,13 +844,7 @@ export class MemoryService {
             existingByHash.id,
           );
 
-        if (input.idempotency_key) {
-          this.db
-            .prepare(
-              "INSERT OR IGNORE INTO idempotency_keys (key, memory_id, created_at) VALUES (?, ?, ?)",
-            )
-            .run(input.idempotency_key, existingByHash.id, nowIsoValue);
-        }
+        bindIdempotencyKey(existingByHash.id);
 
         replacedIds = this.softDeleteCanonicalConflicts({
           scope,
@@ -889,13 +915,7 @@ export class MemoryService {
           expiresAt,
         );
 
-      if (input.idempotency_key) {
-        this.db
-          .prepare(
-            "INSERT OR IGNORE INTO idempotency_keys (key, memory_id, created_at) VALUES (?, ?, ?)",
-          )
-          .run(input.idempotency_key, id, nowIsoValue);
-      }
+      bindIdempotencyKey(id);
 
       replacedIds = this.softDeleteCanonicalConflicts({
         scope,
