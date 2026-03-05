@@ -39,6 +39,20 @@ Use this MCP server entry in your client config:
 }
 ```
 
+Claude Code permissions tip:
+
+If Claude Code keeps prompting for `agent-memory` tool permissions, allow the whole MCP server once in your Claude settings:
+
+```json
+{
+  "permissions": {
+    "allow": ["mcp__agent-memory"]
+  }
+}
+```
+
+This approves all tools from this server (including `memory_get_context` and `memory_capture`), which avoids repeated per-tool prompts.
+
 ### 3) Start enforced memory wrappers
 
 ```bash
