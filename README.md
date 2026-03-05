@@ -53,7 +53,7 @@ If Claude Code keeps prompting for `agent-memory` tool permissions, allow the wh
 
 This approves all tools from this server (including `memory_get_context` and `memory_capture`), which avoids repeated per-tool prompts.
 
-### 3) Start enforced memory wrappers
+### 3) Start wrapper shortcuts (Codex + legacy Claude)
 
 ```bash
 scripts/codex-memory.sh "$HOME/projects/agent-memory"
@@ -61,6 +61,7 @@ scripts/claude-memory.sh "$HOME/projects/agent-memory"
 ```
 
 `session_id` is optional in shortcut scripts. If omitted, one is auto-generated.
+`scripts/claude-memory.sh` is a legacy `claude -p` fallback path.
 
 ## Client Behavior
 
@@ -73,14 +74,20 @@ Use `memory_search` normally. The server shapes payload size by client type:
 
 `memory_search_compact` remains available as an optional fallback endpoint for strict payload-limit environments.
 
-### 3b) Make Claude Code use wrapper by default
+### 3b) Enable Claude interactive hooks (default recommended path)
 
 ```bash
 npm run enable:claude-wrapper
 source ~/.zshrc
 ```
 
-After this, running `claude` starts through the memory wrapper automatically.
+After this, plain `claude` stays in native interactive UX, and memory enforcement runs via
+Claude hooks on every turn (`UserPromptSubmit` + `Stop`).
+
+Behavior notes:
+- fail-open: Claude turn still proceeds if hook memory read/write fails
+- slash commands (for example `/mcp`, `/model`) are not captured as memories
+- previous shell wrapper interception (`claude()` -> `claude -p`) is removed
 
 ### 4) Import latest sessions (auto-discovery)
 
@@ -120,9 +127,9 @@ Call `memory_health` from your MCP client. Expected shape:
 | Task | Command |
 |---|---|
 | Start Codex with enforced memory | `scripts/codex-memory.sh "$HOME/projects/agent-memory"` |
-| Start Claude Code with enforced memory | `scripts/claude-memory.sh "$HOME/projects/agent-memory"` |
-| Make `claude` default to wrapper | `npm run enable:claude-wrapper && source ~/.zshrc` |
-| Start Claude chat (after enable) | `claude` |
+| Enable Claude hooks (recommended) | `npm run enable:claude-wrapper && source ~/.zshrc` |
+| Start Claude chat with enforced memory (interactive mode) | `claude` |
+| Legacy Claude print-wrapper fallback | `scripts/claude-memory.sh "$HOME/projects/agent-memory"` |
 | Import latest Codex session | `scripts/import-codex-session.sh --project-path "$HOME/projects/agent-memory"` |
 | Import latest Claude session | `scripts/import-claude-session.sh --project-path "$HOME/projects/agent-memory"` |
 | Import a specific Codex session file | `scripts/import-codex-session.sh --session-file "$HOME/.codex/sessions/YYYY/MM/DD/rollout-<id>.jsonl" --project-path "$HOME/projects/agent-memory"` |
@@ -145,10 +152,16 @@ Importer shortcut flags (both scripts):
 
 ## Canonical Preferences
 
+- `memory_upsert` idempotency key behavior:
+  - same key + same effective payload (same scope + redacted content hash) returns the existing row (`created: false`)
+  - same key + changed payload is treated as latest-write-wins; the idempotency key is remapped to the latest row
 - Canonical preference memories now enforce **last-write-wins** per `(scope_type, scope_id, canonical_key)`.
 - Canonical key resolution order on write:
   - `metadata.normalized_key` (if provided)
-  - inferred from content when `tags` includes `canonical` and content matches `Favorite <subject>: <value>`
+  - idempotency-key fallback when tags are preference-intent and key normalizes to `favorite_*`
+  - inferred from content when tags are preference-intent and content matches:
+    - `Favorite <subject>: <value>`
+    - `Canonical user preference: favorite <subject> is <value>`
 - When a canonical key is resolved, the upsert response may include:
   - `canonical_key`
   - `replaced_ids` (soft-deleted prior active canonical entries for that key/scope)
@@ -157,6 +170,10 @@ Importer shortcut flags (both scripts):
   - duplicate canonical keys use scope tie-break `session > project > global`, then recency
   - captured dialogue-like rows (`User:`/`Assistant:` with `metadata.captured=true`) are excluded from the remainder when canonical winners are found
 - `memory_get_context` supports temporal preference prompts (for example, “what used to be my favorite zebra color?”) and may return `canonical_timeline` with active and prior values.
+- Runtime freshness for manual tests:
+  - Claude hooks and MCP runtime execute `dist/*`, not `src/*`
+  - after source changes, run `npm run build` and restart affected clients/hooks before validating behavior
+  - stale `dist` can produce false negatives (for example, old idempotency/canonical logic still active)
 
 ## Advanced
 
@@ -172,6 +189,8 @@ node dist/index.js
 node dist/wrapper.js --codex --project-path "$HOME/projects/agent-memory" --session-id my-session
 node dist/wrapper.js --claude --project-path "$HOME/projects/agent-memory" --session-id my-session
 ```
+
+`--claude` above is a legacy print-wrapper path (`claude -p`). Prefer hook-based Claude setup via `npm run enable:claude-wrapper`.
 
 `my-session` above is an example session id label. Use any string you want, or omit `--session-id` when using shortcut scripts.
 Add `--debug` to print per-turn memory read/write operations (get-context, upsert, capture).
