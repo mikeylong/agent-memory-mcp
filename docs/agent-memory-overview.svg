@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="280" viewBox="0 0 880 280" role="img" aria-labelledby="title desc">
+  <title id="title">agent-memory-mcp overview</title>
+  <desc id="desc">Agents and importers connect to agent-memory-mcp, which stores shared memory in SQLite.</desc>
+  <defs>
+    <style>
+      .panel {
+        fill: #ffffff;
+        stroke: #d0d7de;
+        stroke-width: 1.5;
+      }
+      .card {
+        fill: #f6f8fa;
+        stroke: #8250df;
+        stroke-width: 2;
+      }
+      .title {
+        fill: #24292f;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 20px;
+        font-weight: 600;
+        text-anchor: middle;
+      }
+      .body {
+        fill: #57606a;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 15px;
+        text-anchor: middle;
+      }
+      .note {
+        fill: #57606a;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 13px;
+        text-anchor: middle;
+      }
+      .eyebrow {
+        fill: #57606a;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-anchor: middle;
+      }
+      .arrow {
+        fill: none;
+        stroke: #57606a;
+        stroke-width: 2.5;
+        stroke-linecap: round;
+      }
+    </style>
+    <marker id="arrowhead" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M 0 0 L 9 4.5 L 0 9 z" fill="#57606a"/>
+    </marker>
+  </defs>
+
+  <rect class="panel" x="20" y="20" width="840" height="240" rx="24" ry="24"/>
+  <text class="eyebrow" x="440" y="48">SHARED MEMORY FLOW</text>
+
+  <rect class="card" x="55" y="74" width="210" height="96" rx="18" ry="18"/>
+  <text class="title" x="160" y="108">Clients and imports</text>
+  <text class="body" x="160" y="136">
+    <tspan x="160" dy="0">live conversations and</tspan>
+    <tspan x="160" dy="20">imported session history</tspan>
+  </text>
+
+  <path class="arrow" marker-end="url(#arrowhead)" d="M285 112 L315 112"/>
+  <path class="arrow" marker-end="url(#arrowhead)" d="M315 142 L285 142"/>
+  <text class="note" x="300" y="98">write</text>
+  <text class="note" x="300" y="162">recall</text>
+
+  <rect class="card" x="335" y="74" width="210" height="96" rx="18" ry="18"/>
+  <text class="title" x="440" y="108">agent-memory-mcp</text>
+  <text class="body" x="440" y="136">
+    <tspan x="440" dy="0">reads context and writes</tspan>
+    <tspan x="440" dy="20">durable shared memory</tspan>
+  </text>
+
+  <path class="arrow" marker-end="url(#arrowhead)" d="M565 112 L595 112"/>
+  <path class="arrow" marker-end="url(#arrowhead)" d="M595 142 L565 142"/>
+  <text class="note" x="580" y="98">store</text>
+  <text class="note" x="580" y="162">retrieve</text>
+
+  <rect class="card" x="615" y="74" width="210" height="96" rx="18" ry="18"/>
+  <text class="title" x="720" y="108">SQLite store</text>
+  <text class="body" x="720" y="136">
+    <tspan x="720" dy="0">facts, preferences, and</tspan>
+    <tspan x="720" dy="20">project context</tspan>
+  </text>
+
+  <text class="body" x="440" y="226">Memory is written into the store and later read back into future turns.</text>
+</svg>

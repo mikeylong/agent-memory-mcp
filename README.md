@@ -11,38 +11,9 @@ Use the same `AGENT_MEMORY_HOME` across clients so Codex/Claude share one memory
 
 `agent-memory-mcp` sits between your agents and a shared local memory store. It lets each client read relevant context before a turn and write durable facts after a turn, so Codex, Claude Code, and importers all contribute to the same memory layer.
 
-```mermaid
-flowchart TD
-  Clients[Codex, Claude Code, and other MCP clients]
-  Importers[Session importers]
-  Server[agent-memory-mcp]
-  Store[(Shared SQLite memory store)]
-  Embeddings[Optional embeddings]
+![Simple overview of agent-memory-mcp](docs/agent-memory-overview.svg)
 
-  Clients -->|read before each turn| Server
-  Clients -->|write after each turn| Server
-  Importers -->|import past sessions and exports| Server
-  Server -->|memory_get_context and memory_search| Store
-  Store -->|facts, preferences, and project context| Server
-  Server -->|memory_upsert and memory_capture| Store
-  Embeddings -->|improves retrieval ranking| Server
-```
-
-If your Markdown preview does not support Mermaid, the same flow is:
-
-```text
-Codex / Claude Code / other MCP clients
-        | read before each turn
-        | write after each turn
-        v
-  agent-memory-mcp
-     | read/write shared memory
-     v
-Shared SQLite memory store
-
-Session importers ----------> agent-memory-mcp
-Optional embeddings -------> improve retrieval ranking
-```
+Optional embeddings can improve retrieval ranking.
 
 ## Distribution
 
