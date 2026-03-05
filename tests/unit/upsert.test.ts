@@ -34,7 +34,7 @@ describe("upsert dedupe and idempotency", () => {
     expect(second.id).toBe(first.id);
   });
 
-  it("returns the same record for repeated idempotency keys", async () => {
+  it("returns the same record for repeated idempotency keys when payload matches", async () => {
     const fixture = await createTestMemoryService();
     cleanups.push(fixture.cleanup);
 
@@ -47,11 +47,44 @@ describe("upsert dedupe and idempotency", () => {
     const second = await fixture.service.upsert({
       idempotency_key: "op-123",
       scope: { type: "global" },
-      content: "This should be ignored by idempotency.",
+      content: "Primary preference: concise responses.",
     });
 
     expect(second.created).toBe(false);
     expect(second.id).toBe(first.id);
+  });
+
+  it("repoints idempotency keys to the latest memory when payload changes", async () => {
+    const fixture = await createTestMemoryService();
+    cleanups.push(fixture.cleanup);
+
+    const first = await fixture.service.upsert({
+      idempotency_key: "op-123",
+      scope: { type: "global" },
+      content: "Primary preference: concise responses.",
+    });
+
+    const second = await fixture.service.upsert({
+      idempotency_key: "op-123",
+      scope: { type: "global" },
+      content: "Primary preference: detailed responses.",
+    });
+
+    const third = await fixture.service.upsert({
+      idempotency_key: "op-123",
+      scope: { type: "global" },
+      content: "Primary preference: detailed responses.",
+    });
+
+    expect(second.created).toBe(true);
+    expect(second.id).not.toBe(first.id);
+    expect(third.created).toBe(false);
+    expect(third.id).toBe(second.id);
+
+    const mapped = fixture.db.db
+      .prepare("SELECT memory_id FROM idempotency_keys WHERE key = ?")
+      .get("op-123") as { memory_id: string };
+    expect(mapped.memory_id).toBe(second.id);
   });
 
   it("enforces canonical last-write-wins for the same inferred key", async () => {
@@ -93,6 +126,108 @@ describe("upsert dedupe and idempotency", () => {
     });
 
     expect(result.canonical_key).toBe("favorite_notebook_cover_color");
+  });
+
+  it("preserves canonical history when idempotency collisions change favorite values", async () => {
+    const fixture = await createTestMemoryService();
+    cleanups.push(fixture.cleanup);
+
+    const first = await fixture.service.upsert({
+      idempotency_key: "favorite_notebook_cover_color",
+      scope: { type: "global" },
+      content: "Canonical user preference: favorite notebook cover color is red.",
+      tags: ["preference", "notebook", "color"],
+    });
+
+    const second = await fixture.service.upsert({
+      idempotency_key: "favorite_notebook_cover_color",
+      scope: { type: "global" },
+      content: "Canonical user preference: favorite notebook cover color is green.",
+      tags: ["preference", "notebook", "color"],
+    });
+
+    const third = await fixture.service.upsert({
+      idempotency_key: "favorite_notebook_cover_color",
+      scope: { type: "global" },
+      content: "Canonical user preference: favorite notebook cover color is green.",
+      tags: ["preference", "notebook", "color"],
+    });
+
+    expect(first.canonical_key).toBe("favorite_notebook_cover_color");
+    expect(second.canonical_key).toBe("favorite_notebook_cover_color");
+    expect(second.replaced_ids).toEqual([first.id]);
+    expect(third.created).toBe(false);
+    expect(third.id).toBe(second.id);
+
+    const firstRow = fixture.db.db
+      .prepare("SELECT deleted_at FROM memories WHERE id = ?")
+      .get(first.id) as { deleted_at: string | null };
+    expect(firstRow.deleted_at).toBeTypeOf("string");
+
+    const activeCount = fixture.db.db
+      .prepare(
+        "SELECT COUNT(*) as count FROM memories WHERE deleted_at IS NULL AND canonical_key = ?",
+      )
+      .get("favorite_notebook_cover_color") as { count: number };
+    expect(activeCount.count).toBe(1);
+  });
+
+  it("infers canonical key from idempotency key for preference-tagged writes", async () => {
+    const fixture = await createTestMemoryService();
+    cleanups.push(fixture.cleanup);
+
+    const result = await fixture.service.upsert({
+      idempotency_key: "favorite_notebook_cover_color",
+      scope: { type: "global" },
+      content: "Notebook cover color currently green.",
+      tags: ["preference", "notebook", "color"],
+    });
+
+    expect(result.canonical_key).toBe("favorite_notebook_cover_color");
+
+    const row = fixture.db.db
+      .prepare("SELECT metadata_json FROM memories WHERE id = ?")
+      .get(result.id) as { metadata_json: string | null };
+    const metadata = row.metadata_json ? JSON.parse(row.metadata_json) : {};
+    expect(metadata.normalized_key).toBe("favorite_notebook_cover_color");
+  });
+
+  it("repairs stale idempotency pointers that reference deleted rows", async () => {
+    const fixture = await createTestMemoryService();
+    cleanups.push(fixture.cleanup);
+
+    const first = await fixture.service.upsert({
+      idempotency_key: "favorite_notebook_cover_color",
+      scope: { type: "global" },
+      content: "Canonical user preference: favorite notebook cover color is red.",
+      tags: ["preference", "notebook", "color"],
+    });
+
+    const second = await fixture.service.upsert({
+      idempotency_key: "favorite_notebook_cover_color",
+      scope: { type: "global" },
+      content: "Canonical user preference: favorite notebook cover color is green.",
+      tags: ["preference", "notebook", "color"],
+    });
+
+    fixture.db.db
+      .prepare("UPDATE idempotency_keys SET memory_id = ? WHERE key = ?")
+      .run(first.id, "favorite_notebook_cover_color");
+
+    const replay = await fixture.service.upsert({
+      idempotency_key: "favorite_notebook_cover_color",
+      scope: { type: "global" },
+      content: "Canonical user preference: favorite notebook cover color is green.",
+      tags: ["preference", "notebook", "color"],
+    });
+
+    expect(replay.created).toBe(false);
+    expect(replay.id).toBe(second.id);
+
+    const mapped = fixture.db.db
+      .prepare("SELECT memory_id FROM idempotency_keys WHERE key = ?")
+      .get("favorite_notebook_cover_color") as { memory_id: string };
+    expect(mapped.memory_id).toBe(second.id);
   });
 
   it("does not soft-delete non-canonical memories", async () => {

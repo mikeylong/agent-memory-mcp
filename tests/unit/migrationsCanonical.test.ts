@@ -80,4 +80,94 @@ describe("canonical key migration", () => {
       .get() as { canonical_key: string | null };
     expect(notebook.canonical_key).toBe("favorite_notebook_cover_color");
   });
+
+  it("repairs canonical winners and stale idempotency pointers in migration 003", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-memory-migration-"));
+    const dbPath = path.join(dir, "memory.db");
+    cleanups.push(async () => {
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+
+    const db = new BetterSqlite3(dbPath);
+    cleanups.push(async () => {
+      db.close();
+    });
+
+    const initSql = await fs.readFile(
+      path.resolve(process.cwd(), "src/db/schema/001_init.sql"),
+      "utf8",
+    );
+    const canonicalSql = await fs.readFile(
+      path.resolve(process.cwd(), "src/db/schema/002_canonical_key.sql"),
+      "utf8",
+    );
+
+    db.exec(initSql);
+    db.exec(canonicalSql);
+    db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(
+      1,
+      "2026-03-04T00:00:00.000Z",
+    );
+    db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(
+      2,
+      "2026-03-05T00:00:00.000Z",
+    );
+
+    const insert = db.prepare(
+      `
+        INSERT INTO memories (
+          id, scope_type, scope_id, content, content_hash, canonical_key, tags_json, importance, metadata_json,
+          source_agent, embedding_json, created_at, updated_at, last_accessed_at, expires_at, deleted_at
+        ) VALUES (?, 'global', NULL, ?, ?, ?, ?, 1, ?, NULL, NULL, ?, ?, NULL, NULL, NULL)
+      `,
+    );
+
+    insert.run(
+      "legacy-red",
+      "Canonical user preference: favorite notebook cover color is red.",
+      "hash-red",
+      "favorite_notebook_cover_color",
+      JSON.stringify(["preference", "notebook", "color"]),
+      JSON.stringify({}),
+      "2026-03-05T00:00:00.000Z",
+      "2026-03-05T00:00:00.000Z",
+    );
+
+    insert.run(
+      "legacy-green",
+      "Canonical user preference: favorite notebook cover color is green.",
+      "hash-green",
+      null,
+      JSON.stringify(["preference", "notebook", "color"]),
+      JSON.stringify({}),
+      "2026-03-05T00:10:00.000Z",
+      "2026-03-05T00:10:00.000Z",
+    );
+
+    db.prepare(
+      "INSERT INTO idempotency_keys (key, memory_id, created_at) VALUES (?, ?, ?)",
+    ).run("favorite_notebook_cover_color", "legacy-green", "2026-03-05T00:10:00.000Z");
+    db.prepare(
+      "INSERT INTO idempotency_keys (key, memory_id, created_at) VALUES (?, ?, ?)",
+    ).run("favorite_notebook_cover_color_alias", "legacy-red", "2026-03-05T00:10:00.000Z");
+
+    applyMigrations(db);
+
+    const redRow = db
+      .prepare("SELECT canonical_key, deleted_at FROM memories WHERE id = 'legacy-red'")
+      .get() as { canonical_key: string | null; deleted_at: string | null };
+    const greenRow = db
+      .prepare("SELECT canonical_key, deleted_at FROM memories WHERE id = 'legacy-green'")
+      .get() as { canonical_key: string | null; deleted_at: string | null };
+
+    expect(greenRow.canonical_key).toBe("favorite_notebook_cover_color");
+    expect(greenRow.deleted_at).toBeNull();
+    expect(redRow.canonical_key).toBe("favorite_notebook_cover_color");
+    expect(redRow.deleted_at).toBeTypeOf("string");
+
+    const aliasPointer = db
+      .prepare("SELECT memory_id FROM idempotency_keys WHERE key = 'favorite_notebook_cover_color_alias'")
+      .get() as { memory_id: string };
+    expect(aliasPointer.memory_id).toBe("legacy-green");
+  });
 });

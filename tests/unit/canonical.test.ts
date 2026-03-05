@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  canonicalKeyFromIdempotencyKey,
   inferCanonicalKeyFromContent,
   isPreferenceQuery,
   isTemporalPreferenceQuery,
@@ -30,6 +31,34 @@ describe("canonical utilities", () => {
     });
 
     expect(key).toBe("favorite_custom_key");
+  });
+
+  it("infers canonical keys from preference-intent tags", () => {
+    const key = resolveCanonicalKey({
+      content: "Favorite notebook cover color: green.",
+      tags: ["preference", "favorite"],
+    });
+
+    expect(key).toBe("favorite_notebook_cover_color");
+  });
+
+  it("infers canonical keys from Claude-style canonical preference phrasing", () => {
+    const key = resolveCanonicalKey({
+      content: "Canonical user preference: favorite notebook cover color is green.",
+      tags: ["preference", "notebook", "color"],
+    });
+
+    expect(key).toBe("favorite_notebook_cover_color");
+  });
+
+  it("normalizes canonical-looking idempotency keys for fallback resolution", () => {
+    expect(canonicalKeyFromIdempotencyKey("favorite_notebook_cover_color")).toBe(
+      "favorite_notebook_cover_color",
+    );
+    expect(canonicalKeyFromIdempotencyKey("favorite-notebook-cover-color")).toBe(
+      "favorite_notebook_cover_color",
+    );
+    expect(canonicalKeyFromIdempotencyKey("notebook-cover-color")).toBeUndefined();
   });
 
   it("detects temporal preference queries", () => {

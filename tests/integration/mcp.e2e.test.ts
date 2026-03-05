@@ -604,6 +604,83 @@ describe("agent-memory-mcp integration", () => {
     ).toBe(false);
   });
 
+  it("applies latest-write-wins when favorite preferences reuse an idempotency key", async () => {
+    const fixture = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
+    });
+    cleanups.push(fixture.cleanup);
+
+    const first = await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        idempotency_key: "favorite_notebook_cover_color",
+        scope: { type: "global" },
+        content: "Canonical user preference: favorite notebook cover color is red.",
+        tags: ["preference", "notebook", "color"],
+      },
+    });
+    const firstPayload = parseToolPayload(first as any);
+
+    const second = await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        idempotency_key: "favorite_notebook_cover_color",
+        scope: { type: "global" },
+        content: "Canonical user preference: favorite notebook cover color is green.",
+        tags: ["preference", "notebook", "color"],
+      },
+    });
+    const secondPayload = parseToolPayload(second as any);
+    expect(secondPayload.created).toBe(true);
+    expect(secondPayload.id).not.toBe(firstPayload.id);
+    expect(secondPayload.canonical_key).toBe("favorite_notebook_cover_color");
+    expect(secondPayload.replaced_ids).toEqual([firstPayload.id]);
+
+    const third = await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        idempotency_key: "favorite_notebook_cover_color",
+        scope: { type: "global" },
+        content: "Canonical user preference: favorite notebook cover color is green.",
+        tags: ["preference", "notebook", "color"],
+      },
+    });
+    const thirdPayload = parseToolPayload(third as any);
+    expect(thirdPayload.created).toBe(false);
+    expect(thirdPayload.id).toBe(secondPayload.id);
+
+    const context = await fixture.client.callTool({
+      name: "memory_get_context",
+      arguments: {
+        query: "What is my favorite notebook cover color?",
+        max_items: 8,
+      },
+    });
+    const contextPayload = parseToolPayload(context as any);
+    expect(contextPayload.items.length).toBeGreaterThan(0);
+    expect(contextPayload.items[0].content).toContain("green");
+
+    const temporalContext = await fixture.client.callTool({
+      name: "memory_get_context",
+      arguments: {
+        query: "What used to be my favorite notebook cover color?",
+        max_items: 8,
+      },
+    });
+    const temporalPayload = parseToolPayload(temporalContext as any);
+    expect(Array.isArray(temporalPayload.canonical_timeline)).toBe(true);
+    const notebookTimeline = temporalPayload.canonical_timeline.filter(
+      (entry: any) => entry.canonical_key === "favorite_notebook_cover_color",
+    );
+    expect(notebookTimeline.length).toBeGreaterThanOrEqual(2);
+    expect(notebookTimeline[0].is_active).toBe(true);
+    expect(notebookTimeline[0].content).toContain("green");
+    expect(notebookTimeline.some((entry: any) => entry.content.includes("red"))).toBe(true);
+    expect(notebookTimeline.some((entry: any) => typeof entry.deleted_at === "string")).toBe(true);
+  });
+
   it("returns canonical timeline for temporal get_context queries", async () => {
     const fixture = await createClientFixture({
       envOverrides: {
