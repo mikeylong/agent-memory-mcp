@@ -138,7 +138,7 @@ export function parseWrapperArgs(argv: string[], cwd = process.cwd()): WrapperOp
   if (codexMode) {
     shortcutModelCommand = `codex exec - --color never --skip-git-repo-check -C ${shellQuote(projectPath)}`;
   } else if (claudeMode) {
-    shortcutModelCommand = "claude -p --output-format text";
+    shortcutModelCommand = "claude -p";
   }
 
   return {
@@ -256,7 +256,7 @@ function helpText(): string {
     "  --token-budget <n>      Approx token budget for context (default: 1200)",
     "  --model-command <cmd>   Command to execute with wrapped prompt on stdin",
     "  --codex                 Shortcut for: codex exec - --color never --skip-git-repo-check -C <project-path>",
-    "  --claude                Shortcut for: claude -p --output-format text",
+    "  --claude                Shortcut for: claude -p",
     "  --debug                 Print memory read/write operations for each turn",
     "  -h, --help              Show this help text",
     "",

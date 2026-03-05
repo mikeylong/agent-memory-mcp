@@ -52,10 +52,10 @@ describe("wrapper args", () => {
     expect(parsed.modelCommand).toContain("/tmp/repo-with spaces");
   });
 
-  it("expands --claude into a Claude Code print-mode command", () => {
+  it("expands --claude into a Claude Code command with default pretty output", () => {
     const parsed = parseWrapperArgs(["--claude"]);
 
-    expect(parsed.modelCommand).toBe("claude -p --output-format text");
+    expect(parsed.modelCommand).toBe("claude -p");
   });
 
   it("rejects enabling both --codex and --claude", () => {
