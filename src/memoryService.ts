@@ -1,6 +1,12 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import type { RunResult } from "better-sqlite3";
+import {
+  isPreferenceQuery,
+  normalizeCanonicalKey,
+  isTemporalPreferenceQuery,
+  resolveCanonicalKey as resolveCanonicalKeyForInput,
+} from "./canonical.js";
 import { MemoryDb } from "./db/client.js";
 import { getLatestSchemaVersion } from "./db/migrations.js";
 import { EmbeddingsProvider } from "./embeddings/provider.js";
@@ -12,13 +18,16 @@ import {
 } from "./retrieval/ranker.js";
 import { redactSensitiveText } from "./redaction/redact.js";
 import {
+  CanonicalTimelineItem,
   CaptureInput,
+  GetContextResult,
   GetContextInput,
   MemoryItem,
   ScopeRef,
   ScopeSelector,
   SearchInput,
   UpsertInput,
+  UpsertResult,
 } from "./types.js";
 import { hashProjectPath, normalizeScope, normalizeScopes, scopeWhereClause } from "./scope.js";
 
@@ -28,6 +37,7 @@ interface MemoryRow {
   scope_id: string | null;
   content: string;
   content_hash: string;
+  canonical_key: string | null;
   tags_json: string;
   importance: number;
   metadata_json: string | null;
@@ -44,6 +54,15 @@ interface SearchInternalResult {
   items: MemoryItem[];
   total: number;
   scores: Record<string, number>;
+}
+
+interface CanonicalTimelineRow {
+  canonical_key: string;
+  scope_type: "global" | "project" | "session";
+  scope_id: string | null;
+  content: string;
+  updated_at: string;
+  deleted_at: string | null;
 }
 
 export type EmbeddingsHealthState = "ok" | "degraded";
@@ -209,6 +228,10 @@ function cleanTags(tags?: string[]): string[] {
   return [...new Set(tags.map((tag) => tag.trim()).filter((tag) => tag.length > 0))].slice(0, 64);
 }
 
+function isCanonicalMetadataKeyPresent(metadata: Record<string, unknown>): boolean {
+  return typeof metadata.normalized_key === "string" && metadata.normalized_key.trim().length > 0;
+}
+
 function mergeMetadata(
   existing: Record<string, unknown>,
   incoming: Record<string, unknown>,
@@ -301,6 +324,92 @@ function parseEmbedding(json: string | null): number[] | null {
   return parsed as number[];
 }
 
+const CANONICAL_SCOPE_PRIORITY: Record<"global" | "project" | "session", number> = {
+  global: 1,
+  project: 2,
+  session: 3,
+};
+
+function scopePriority(scopeType: "global" | "project" | "session"): number {
+  return CANONICAL_SCOPE_PRIORITY[scopeType] ?? 0;
+}
+
+function hasCanonicalTagValue(tags: string[]): boolean {
+  return tags.some((tag) => tag.trim().toLowerCase() === "canonical");
+}
+
+function hasMetadataCanonicalKey(metadata?: Record<string, unknown>): boolean {
+  if (!metadata) {
+    return false;
+  }
+
+  return typeof metadata.normalized_key === "string" && metadata.normalized_key.trim().length > 0;
+}
+
+function isCanonicalCandidateForPreference(item: MemoryItem): boolean {
+  return hasMetadataCanonicalKey(item.metadata) || hasCanonicalTagValue(item.tags);
+}
+
+function canonicalKeyForPreferenceItem(item: MemoryItem): string | undefined {
+  const resolved = resolveCanonicalKeyForInput({
+    content: item.content,
+    tags: item.tags,
+    metadata: item.metadata,
+  });
+  if (resolved) {
+    return resolved;
+  }
+
+  const metadataKey = item.metadata?.normalized_key;
+  if (typeof metadataKey === "string") {
+    return normalizeCanonicalKey(metadataKey);
+  }
+
+  return undefined;
+}
+
+function compareCanonicalWinnerPriority(a: MemoryItem, b: MemoryItem): number {
+  const scopeDiff = scopePriority(b.scope.type) - scopePriority(a.scope.type);
+  if (scopeDiff !== 0) {
+    return scopeDiff;
+  }
+
+  if (b.updated_at !== a.updated_at) {
+    return b.updated_at.localeCompare(a.updated_at);
+  }
+
+  return a.id.localeCompare(b.id);
+}
+
+function isCapturedDialogueLike(item: MemoryItem): boolean {
+  const looksLikeDialogue = /^\s*(user|assistant):/i.test(item.content);
+  if (!looksLikeDialogue) {
+    return false;
+  }
+
+  if (item.metadata?.captured === true) {
+    return true;
+  }
+
+  return item.tags.some((tag) => tag.trim().toLowerCase() === "turn-log");
+}
+
+function preferenceQueryTerms(query: string): string[] {
+  const terms = query.toLowerCase().match(/[a-z0-9_]{3,}/g) ?? [];
+  return [...new Set(terms)];
+}
+
+function canonicalCandidateScore(item: MemoryItem, terms: string[]): number {
+  if (terms.length === 0) {
+    return 0;
+  }
+
+  const canonicalKey = canonicalKeyForPreferenceItem(item) ?? "";
+  const haystack = `${canonicalKey} ${item.content}`.toLowerCase();
+
+  return terms.reduce((score, term) => score + (haystack.includes(term) ? 1 : 0), 0);
+}
+
 export class MemoryService {
   private embeddingsState: "ok" | "degraded";
 
@@ -344,12 +453,249 @@ export class MemoryService {
     return normalized;
   }
 
-  async upsert(input: UpsertInput): Promise<{
-    id: string;
-    created: boolean;
-    redacted: boolean;
-    expires_at?: string;
-  }> {
+  private withCanonicalMetadata(
+    metadata: Record<string, unknown>,
+    canonicalKey: string | null | undefined,
+  ): Record<string, unknown> {
+    if (!canonicalKey || isCanonicalMetadataKeyPresent(metadata)) {
+      return metadata;
+    }
+
+    return {
+      ...metadata,
+      normalized_key: canonicalKey,
+    };
+  }
+
+  private softDeleteCanonicalConflicts(params: {
+    scope: ScopeRef;
+    canonicalKey: string | null;
+    keepId: string;
+    nowIso: string;
+  }): string[] {
+    if (!params.canonicalKey) {
+      return [];
+    }
+
+    const rows = this.db
+      .prepare(
+        `
+          SELECT id
+          FROM memories
+          WHERE scope_type = ?
+            AND COALESCE(scope_id, '') = COALESCE(?, '')
+            AND canonical_key = ?
+            AND deleted_at IS NULL
+            AND id <> ?
+        `,
+      )
+      .all(
+        params.scope.type,
+        params.scope.id ?? null,
+        params.canonicalKey,
+        params.keepId,
+      ) as Array<{ id: string }>;
+
+    const replacedIds = rows.map((row) => row.id);
+    if (replacedIds.length === 0) {
+      return [];
+    }
+
+    const placeholders = replacedIds.map(() => "?").join(", ");
+    this.db
+      .prepare(
+        `
+          UPDATE memories
+          SET deleted_at = ?,
+              updated_at = ?
+          WHERE id IN (${placeholders})
+        `,
+      )
+      .run(params.nowIso, params.nowIso, ...replacedIds);
+
+    return replacedIds;
+  }
+
+  private canonicalKeysForIds(ids: string[]): string[] {
+    if (ids.length === 0) {
+      return [];
+    }
+
+    const placeholders = ids.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(
+        `
+          SELECT DISTINCT canonical_key
+          FROM memories
+          WHERE id IN (${placeholders})
+            AND canonical_key IS NOT NULL
+        `,
+      )
+      .all(...ids) as Array<{ canonical_key: string }>;
+
+    return rows
+      .map((row) => row.canonical_key)
+      .filter((key): key is string => typeof key === "string" && key.length > 0);
+  }
+
+  private canonicalTimelineForKeys(
+    keys: string[],
+    scopes: ScopeSelector[],
+    maxRows = 50,
+  ): CanonicalTimelineItem[] {
+    if (keys.length === 0) {
+      return [];
+    }
+
+    const uniqueKeys = [...new Set(keys)];
+    const keyPlaceholders = uniqueKeys.map(() => "?").join(", ");
+    const scopeClause = scopeWhereClause(scopes, "m");
+    const now = nowIso();
+
+    const rows = this.db
+      .prepare(
+        `
+          SELECT
+            m.canonical_key,
+            m.scope_type,
+            m.scope_id,
+            m.content,
+            m.updated_at,
+            m.deleted_at
+          FROM memories m
+          WHERE ${scopeClause.clause}
+            AND m.canonical_key IN (${keyPlaceholders})
+            AND (m.expires_at IS NULL OR m.expires_at > ?)
+          ORDER BY
+            m.canonical_key ASC,
+            CASE WHEN m.deleted_at IS NULL THEN 1 ELSE 0 END DESC,
+            m.updated_at DESC,
+            m.id ASC
+          LIMIT ?
+        `,
+      )
+      .all(...scopeClause.params, ...uniqueKeys, now, maxRows) as CanonicalTimelineRow[];
+
+    return rows.map((row) => ({
+      canonical_key: row.canonical_key,
+      scope: {
+        type: row.scope_type,
+        id: row.scope_id ?? undefined,
+      },
+      content: row.content,
+      updated_at: row.updated_at,
+      deleted_at: row.deleted_at ?? undefined,
+      is_active: row.deleted_at === null,
+    }));
+  }
+
+  private fetchCanonicalPreferenceCandidates(
+    scopes: ScopeSelector[],
+    query: string,
+    limit = 200,
+  ): Array<{ item: MemoryItem; score: number }> {
+    const where = buildActiveWhere(scopes, "m");
+    const rows = this.db
+      .prepare(
+        `
+          SELECT m.*
+          FROM memories m
+          WHERE ${where.clause}
+            AND m.canonical_key IS NOT NULL
+          ORDER BY m.updated_at DESC
+          LIMIT ?
+        `,
+      )
+      .all(...where.params, Math.max(1, Math.min(500, limit))) as MemoryRow[];
+
+    const items = rows.map((row) => toMemoryItem(row, true));
+    const terms = preferenceQueryTerms(query);
+    const scored = items.map((item) => ({
+      item,
+      score: canonicalCandidateScore(item, terms),
+    }));
+
+    const maxScore = scored.reduce((max, entry) => Math.max(max, entry.score), 0);
+    const filtered =
+      maxScore >= 2
+        ? scored.filter((entry) => entry.score >= 2)
+        : maxScore >= 1
+          ? scored.filter((entry) => entry.score >= 1)
+          : scored;
+
+    return filtered.sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+
+      return compareCanonicalWinnerPriority(a.item, b.item);
+    });
+  }
+
+  private reorderContextForPreferenceQuery(args: {
+    items: MemoryItem[];
+    scores: Record<string, number>;
+    canonicalCandidates: Array<{ item: MemoryItem; score: number }>;
+  }): { items: MemoryItem[]; scores: Record<string, number> } {
+    const effectiveScores: Record<string, number> = { ...args.scores };
+    const canonicalRawScores = new Map<string, number>();
+
+    for (const candidate of args.canonicalCandidates) {
+      canonicalRawScores.set(candidate.item.id, candidate.score);
+      const normalizedCandidateScore = Math.min(0.99, 0.8 + candidate.score * 0.05);
+      effectiveScores[candidate.item.id] = Math.max(
+        effectiveScores[candidate.item.id] ?? 0,
+        normalizedCandidateScore,
+      );
+    }
+
+    const allCandidates = [...args.canonicalCandidates.map((entry) => entry.item), ...args.items];
+    const winnersByKey = new Map<string, MemoryItem>();
+
+    for (const item of allCandidates) {
+      if (!isCanonicalCandidateForPreference(item)) {
+        continue;
+      }
+
+      const canonicalKey = canonicalKeyForPreferenceItem(item);
+      if (!canonicalKey) {
+        continue;
+      }
+
+      const existing = winnersByKey.get(canonicalKey);
+      if (!existing || compareCanonicalWinnerPriority(item, existing) < 0) {
+        winnersByKey.set(canonicalKey, item);
+      }
+    }
+
+    if (winnersByKey.size === 0) {
+      return {
+        items: args.items,
+        scores: effectiveScores,
+      };
+    }
+
+    const winners = [...winnersByKey.values()].sort((a, b) => {
+      const canonicalScoreDiff = (canonicalRawScores.get(b.id) ?? 0) - (canonicalRawScores.get(a.id) ?? 0);
+      if (canonicalScoreDiff !== 0) {
+        return canonicalScoreDiff;
+      }
+
+      const scoreDiff = (effectiveScores[b.id] ?? 0) - (effectiveScores[a.id] ?? 0);
+      if (scoreDiff !== 0) {
+        return scoreDiff;
+      }
+
+      return compareCanonicalWinnerPriority(a, b);
+    });
+
+    return {
+      items: winners,
+      scores: effectiveScores,
+    };
+  }
+
+  async upsert(input: UpsertInput): Promise<UpsertResult> {
     const metadata = input.metadata ?? {};
     const scope = this.resolveScope(input.scope, metadata);
     const now = new Date();
@@ -363,6 +709,13 @@ export class MemoryService {
 
     const hash = contentHash(redactedContent);
     const tags = cleanTags(input.tags);
+    const canonicalKey =
+      resolveCanonicalKeyForInput({
+        content: redactedContent,
+        tags,
+        metadata,
+      }) ?? null;
+    const metadataForWrite = this.withCanonicalMetadata(metadata, canonicalKey);
     const importance = normalizeImportance(input.importance);
 
     let expiresAt: string | null;
@@ -374,7 +727,8 @@ export class MemoryService {
       expiresAt = null;
     }
 
-    const sourceAgent = typeof metadata.source_agent === "string" ? metadata.source_agent : null;
+    const sourceAgent =
+      typeof metadataForWrite.source_agent === "string" ? metadataForWrite.source_agent : null;
 
     if (input.idempotency_key) {
       const existingByKey = this.db
@@ -396,6 +750,7 @@ export class MemoryService {
           created: false,
           redacted: false,
           expires_at: existingByKey.expires_at ?? undefined,
+          canonical_key: existingByKey.canonical_key ?? undefined,
         };
       }
     }
@@ -418,59 +773,80 @@ export class MemoryService {
       const existingTags = parseJson<string[]>(existingByHash.tags_json, []);
       const mergedTags = mergeTags(existingTags, tags);
       const existingMetadata = parseJson<Record<string, unknown>>(existingByHash.metadata_json, {});
-      const mergedMetadata = mergeMetadata(existingMetadata, metadata);
+      const mergedMetadata = mergeMetadata(existingMetadata, metadataForWrite);
+      const effectiveCanonicalKey = canonicalKey ?? existingByHash.canonical_key ?? null;
+      const mergedMetadataWithCanonical = this.withCanonicalMetadata(
+        mergedMetadata,
+        effectiveCanonicalKey,
+      );
 
       const nextImportance = input.importance === undefined ? existingByHash.importance : importance;
       if (!expiresAt) {
         expiresAt = existingByHash.expires_at;
       }
 
-      this.db
-        .prepare(
-          `
-            UPDATE memories
-            SET tags_json = ?,
-                metadata_json = ?,
-                importance = ?,
-                source_agent = ?,
-                updated_at = ?,
-                expires_at = ?
-            WHERE id = ?
-          `,
-        )
-        .run(
-          JSON.stringify(mergedTags),
-          JSON.stringify(mergedMetadata),
-          nextImportance,
-          sourceAgent,
-          nowIsoValue,
-          expiresAt,
-          existingByHash.id,
-        );
-
-      if (input.idempotency_key) {
+      let replacedIds: string[] = [];
+      const transaction = this.db.transaction(() => {
         this.db
           .prepare(
-            "INSERT OR IGNORE INTO idempotency_keys (key, memory_id, created_at) VALUES (?, ?, ?)",
+            `
+              UPDATE memories
+              SET tags_json = ?,
+                  metadata_json = ?,
+                  importance = ?,
+                  source_agent = ?,
+                  canonical_key = ?,
+                  updated_at = ?,
+                  expires_at = ?
+              WHERE id = ?
+            `,
           )
-          .run(input.idempotency_key, existingByHash.id, nowIsoValue);
-      }
+          .run(
+            JSON.stringify(mergedTags),
+            JSON.stringify(mergedMetadataWithCanonical),
+            nextImportance,
+            sourceAgent,
+            effectiveCanonicalKey,
+            nowIsoValue,
+            expiresAt,
+            existingByHash.id,
+          );
+
+        if (input.idempotency_key) {
+          this.db
+            .prepare(
+              "INSERT OR IGNORE INTO idempotency_keys (key, memory_id, created_at) VALUES (?, ?, ?)",
+            )
+            .run(input.idempotency_key, existingByHash.id, nowIsoValue);
+        }
+
+        replacedIds = this.softDeleteCanonicalConflicts({
+          scope,
+          canonicalKey: effectiveCanonicalKey,
+          keepId: existingByHash.id,
+          nowIso: nowIsoValue,
+        });
+      });
+      transaction();
 
       return {
         id: existingByHash.id,
         created: false,
         redacted: redaction.redacted,
         expires_at: expiresAt ?? undefined,
+        canonical_key: effectiveCanonicalKey ?? undefined,
+        replaced_ids: replacedIds.length > 0 ? replacedIds : undefined,
       };
     }
 
     const id = crypto.randomUUID();
-    const metadataJson = JSON.stringify(metadata);
+    const metadataJson = JSON.stringify(metadataForWrite);
     const tagsJson = JSON.stringify(tags);
 
     const embeddings = await this.embedSafe([redactedContent]);
     const embedding = embeddings?.[0] ?? null;
 
+    let replacedIds: string[] = [];
     const transaction = this.db.transaction(() => {
       this.db
         .prepare(
@@ -481,6 +857,7 @@ export class MemoryService {
               scope_id,
               content,
               content_hash,
+              canonical_key,
               tags_json,
               importance,
               metadata_json,
@@ -491,7 +868,7 @@ export class MemoryService {
               last_accessed_at,
               expires_at,
               deleted_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
           `,
         )
         .run(
@@ -500,6 +877,7 @@ export class MemoryService {
           scope.id ?? null,
           redactedContent,
           hash,
+          canonicalKey,
           tagsJson,
           importance,
           metadataJson,
@@ -518,6 +896,13 @@ export class MemoryService {
           )
           .run(input.idempotency_key, id, nowIsoValue);
       }
+
+      replacedIds = this.softDeleteCanonicalConflicts({
+        scope,
+        canonicalKey,
+        keepId: id,
+        nowIso: nowIsoValue,
+      });
     });
 
     transaction();
@@ -527,6 +912,8 @@ export class MemoryService {
       created: true,
       redacted: redaction.redacted,
       expires_at: expiresAt ?? undefined,
+      canonical_key: canonicalKey ?? undefined,
+      replaced_ids: replacedIds.length > 0 ? replacedIds : undefined,
     };
   }
 
@@ -824,12 +1211,7 @@ export class MemoryService {
     };
   }
 
-  async getContext(input: GetContextInput): Promise<{
-    items: MemoryItem[];
-    summary: string;
-    used_scopes: Array<"global" | "project" | "session">;
-    scores: Record<string, number>;
-  }> {
+  async getContext(input: GetContextInput): Promise<GetContextResult> {
     const scopes: ScopeSelector[] = [{ type: "global" }];
 
     if (input.project_path) {
@@ -858,10 +1240,23 @@ export class MemoryService {
       include_metadata: true,
     });
 
+    let contextItems = searchResult.items;
+    let contextScores = searchResult.scores;
+
+    if (isPreferenceQuery(input.query)) {
+      const reordered = this.reorderContextForPreferenceQuery({
+        items: searchResult.items,
+        scores: searchResult.scores,
+        canonicalCandidates: this.fetchCanonicalPreferenceCandidates(scopes, input.query),
+      });
+      contextItems = reordered.items;
+      contextScores = reordered.scores;
+    }
+
     const selectedItems: MemoryItem[] = [];
     let consumed = 0;
 
-    for (const item of searchResult.items) {
+    for (const item of contextItems) {
       if (selectedItems.length >= maxItems) {
         break;
       }
@@ -879,13 +1274,23 @@ export class MemoryService {
       "global" | "project" | "session"
     >;
 
+    const shouldIncludeCanonicalTimeline = isTemporalPreferenceQuery(input.query);
+    const canonicalTimeline =
+      shouldIncludeCanonicalTimeline
+        ? this.canonicalTimelineForKeys(
+            this.canonicalKeysForIds(selectedItems.map((item) => item.id)),
+            scopes,
+          )
+        : undefined;
+
     return {
       items: selectedItems,
       summary: deterministicSummary(selectedItems),
       used_scopes: usedScopes,
       scores: Object.fromEntries(
-        selectedItems.map((item) => [item.id, searchResult.scores[item.id] ?? 0]),
+        selectedItems.map((item) => [item.id, contextScores[item.id] ?? 0]),
       ),
+      canonical_timeline: canonicalTimeline?.length ? canonicalTimeline : undefined,
     };
   }
 

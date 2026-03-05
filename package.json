@@ -1,6 +1,6 @@
 {
   "name": "agent-memory-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local cross-agent memory layer over MCP",
   "type": "module",
   "main": "dist/index.js",

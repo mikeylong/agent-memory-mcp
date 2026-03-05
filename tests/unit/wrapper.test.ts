@@ -12,6 +12,7 @@ describe("wrapper args", () => {
     expect(parsed.projectPath).toBe("/tmp/my-project");
     expect(parsed.maxItems).toBe(12);
     expect(parsed.tokenBudget).toBe(1200);
+    expect(parsed.debug).toBe(false);
     expect(parsed.sessionId.startsWith("session-")).toBe(true);
   });
 
@@ -27,6 +28,7 @@ describe("wrapper args", () => {
       "900",
       "--model-command",
       "cat",
+      "--debug",
     ]);
 
     expect(parsed.projectPath).toBe("/tmp/another");
@@ -34,6 +36,7 @@ describe("wrapper args", () => {
     expect(parsed.maxItems).toBe(8);
     expect(parsed.tokenBudget).toBe(900);
     expect(parsed.modelCommand).toBe("cat");
+    expect(parsed.debug).toBe(true);
   });
 
   it("expands --codex into a codex exec model command", () => {

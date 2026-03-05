@@ -20,13 +20,6 @@ function inferClientClass(name: string): ClientClass {
     }
   }
 
-  const constrainedHints = ["claude desktop", "claude-desktop"];
-  for (const hint of constrainedHints) {
-    if (name.includes(hint)) {
-      return "constrained";
-    }
-  }
-
   return "unknown";
 }
 
@@ -57,4 +50,3 @@ export function resolveClientClassFromServer(server: McpServer): ClientClass {
     override,
   });
 }
-

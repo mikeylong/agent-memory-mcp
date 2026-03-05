@@ -34,6 +34,16 @@ export interface UpsertInput {
   metadata?: Record<string, unknown>;
 }
 
+export interface UpsertResult {
+  [key: string]: unknown;
+  id: string;
+  created: boolean;
+  redacted: boolean;
+  expires_at?: string;
+  canonical_key?: string;
+  replaced_ids?: string[];
+}
+
 export interface SearchInput {
   query: string;
   scopes?: ScopeSelector[];
@@ -50,6 +60,25 @@ export interface GetContextInput {
   session_id?: string;
   max_items?: number;
   token_budget?: number;
+}
+
+export interface CanonicalTimelineItem {
+  [key: string]: unknown;
+  canonical_key: string;
+  scope: ScopeRef;
+  content: string;
+  updated_at: string;
+  deleted_at?: string;
+  is_active: boolean;
+}
+
+export interface GetContextResult {
+  [key: string]: unknown;
+  items: MemoryItem[];
+  summary: string;
+  used_scopes: Array<"global" | "project" | "session">;
+  scores: Record<string, number>;
+  canonical_timeline?: CanonicalTimelineItem[];
 }
 
 export interface CaptureInput {

@@ -47,7 +47,7 @@ export function loadConfig(): AppConfig {
     embeddingsDisabled:
       process.env.AGENT_MEMORY_DISABLE_EMBEDDINGS === "1" ||
       process.env.AGENT_MEMORY_DISABLE_EMBEDDINGS === "true",
-    version: "0.1.0",
+    version: "0.2.0",
   };
 }
 

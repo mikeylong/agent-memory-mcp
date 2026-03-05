@@ -320,10 +320,11 @@ describe("agent-memory-mcp integration", () => {
     expect(bytes).toBeLessThanOrEqual(5000);
   });
 
-  it("hard-clamps memory_search for constrained clients", async () => {
+  it("hard-clamps memory_search for explicitly constrained clients", async () => {
     const fixture = await createClientFixture({
       envOverrides: {
         AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+        AGENT_MEMORY_CLIENT_CLASS_OVERRIDE: "constrained",
       },
       clientInfo: {
         name: "Claude Desktop",
@@ -334,7 +335,7 @@ describe("agent-memory-mcp integration", () => {
 
     await seedMarkerMemories({
       fixture,
-      marker: "desktop-clamp marker",
+      marker: "constrained-override marker",
       count: 20,
       contentRepeat: 12000,
       metadataRepeat: 2000,
@@ -343,7 +344,7 @@ describe("agent-memory-mcp integration", () => {
     const searchResult = await fixture.client.callTool({
       name: "memory_search",
       arguments: {
-        query: "desktop-clamp marker",
+        query: "constrained-override marker",
         scopes: [{ type: "global" }],
         limit: 200,
         include_metadata: true,
@@ -529,6 +530,334 @@ describe("agent-memory-mcp integration", () => {
 
     const upsertPayload = parseToolPayload(upsert as any);
     expect(upsertPayload.id).toBeTypeOf("string");
+  });
+
+  it("keeps canonical preference answers consistent across clients sharing one DB", async () => {
+    const fixtureA = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
+      clientInfo: {
+        name: "codex-a",
+        version: "1.0.0",
+      },
+    });
+    cleanups.push(fixtureA.cleanup);
+
+    const root = process.cwd();
+    const sharedHome = path.dirname(fixtureA.dbPath);
+    const transportB = new StdioClientTransport({
+      command: process.execPath,
+      args: [
+        path.join(root, "node_modules", "tsx", "dist", "cli.mjs"),
+        path.join(root, "src", "index.ts"),
+      ],
+      cwd: root,
+      env: {
+        ...sanitizeEnv(process.env),
+        AGENT_MEMORY_HOME: sharedHome,
+        AGENT_MEMORY_DB_PATH: fixtureA.dbPath,
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
+      stderr: "pipe",
+    });
+    const clientB = new Client({ name: "claude-b", version: "1.0.0" });
+    await clientB.connect(transportB);
+    cleanups.push(async () => {
+      await transportB.close();
+    });
+
+    const first = await fixtureA.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "global" },
+        content: "Favorite zebra color: black and white and yellow.",
+        tags: ["user-preference", "canonical"],
+      },
+    });
+    const firstPayload = parseToolPayload(first as any);
+
+    const second = await fixtureA.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "global" },
+        content: "Favorite zebra color: none (user does not have one).",
+        tags: ["user-preference", "canonical"],
+      },
+    });
+    const secondPayload = parseToolPayload(second as any);
+    expect(secondPayload.replaced_ids).toEqual([firstPayload.id]);
+
+    const searchFromB = await clientB.callTool({
+      name: "memory_search",
+      arguments: {
+        query: "favorite zebra color",
+        scopes: [{ type: "global" }],
+        include_metadata: true,
+      },
+    });
+    const payloadB = parseToolPayload(searchFromB as any);
+    expect(payloadB.items.length).toBeGreaterThan(0);
+    expect(payloadB.items[0].content).toContain("none (user does not have one)");
+    expect(
+      payloadB.items.some((item: any) => item.content.includes("black and white and yellow")),
+    ).toBe(false);
+  });
+
+  it("returns canonical timeline for temporal get_context queries", async () => {
+    const fixture = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
+    });
+    cleanups.push(fixture.cleanup);
+
+    await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "global" },
+        content: "Favorite zebra color: black and white and yellow.",
+        tags: ["user-preference", "canonical"],
+      },
+    });
+
+    await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "global" },
+        content: "Favorite zebra color: none (user does not have one).",
+        tags: ["user-preference", "canonical"],
+      },
+    });
+
+    const context = await fixture.client.callTool({
+      name: "memory_get_context",
+      arguments: {
+        query: "what used to be my favorite zebra color?",
+        max_items: 8,
+      },
+    });
+    const payload = parseToolPayload(context as any);
+    expect(Array.isArray(payload.canonical_timeline)).toBe(true);
+    expect(payload.canonical_timeline.length).toBeGreaterThanOrEqual(2);
+
+    const zebraTimeline = payload.canonical_timeline.filter(
+      (entry: any) => entry.canonical_key === "favorite_zebra_color",
+    );
+    expect(zebraTimeline.length).toBeGreaterThanOrEqual(2);
+    expect(zebraTimeline[0].is_active).toBe(true);
+    expect(zebraTimeline[0].content).toContain("none (user does not have one)");
+    expect(zebraTimeline.some((entry: any) => typeof entry.deleted_at === "string")).toBe(true);
+  });
+
+  it("prioritizes active canonical preference over noisy captured dialogue in get_context", async () => {
+    const fixture = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
+    });
+    cleanups.push(fixture.cleanup);
+
+    const projectPath = "/tmp/canonical-priority-project";
+    const projectScopeId = hashProjectPath(projectPath);
+
+    await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "global" },
+        content: "Favorite notebook cover color: white.",
+        tags: ["user-preference", "canonical"],
+      },
+    });
+
+    await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "global" },
+        content: "Favorite notebook cover color: matte white.",
+        tags: ["user-preference", "canonical"],
+      },
+    });
+
+    await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "project", id: projectScopeId },
+        content: "Assistant: Your notebook cover color preference is red.",
+        metadata: {
+          captured: true,
+        },
+      },
+    });
+
+    await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "project", id: projectScopeId },
+        content: "User: What is my notebook cover color preference?",
+        metadata: {
+          captured: true,
+        },
+      },
+    });
+
+    const context = await fixture.client.callTool({
+      name: "memory_get_context",
+      arguments: {
+        query: "What is my current notebook cover color preference?",
+        project_path: projectPath,
+        max_items: 8,
+      },
+    });
+
+    const payload = parseToolPayload(context as any);
+    expect(payload.items.length).toBeGreaterThan(0);
+    expect(payload.items[0].content).toContain("matte white");
+    expect(
+      payload.items.some((item: any) => /^(\s)*(user|assistant):/i.test(String(item.content))),
+    ).toBe(false);
+  });
+
+  it("uses most-specific-scope tie-break for duplicate canonical preference keys", async () => {
+    const fixture = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
+    });
+    cleanups.push(fixture.cleanup);
+
+    const projectPath = "/tmp/canonical-scope-priority-project";
+    const projectScopeId = hashProjectPath(projectPath);
+
+    await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "global" },
+        content: "Favorite notebook cover color: matte white.",
+        tags: ["user-preference", "canonical"],
+      },
+    });
+
+    await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "project", id: projectScopeId },
+        content: "Favorite notebook cover color: cedar green.",
+        tags: ["user-preference", "canonical"],
+        metadata: {
+          project_path: projectPath,
+        },
+      },
+    });
+
+    const withProjectContext = await fixture.client.callTool({
+      name: "memory_get_context",
+      arguments: {
+        query: "What is my favorite notebook cover color?",
+        project_path: projectPath,
+        max_items: 5,
+      },
+    });
+    const withProjectPayload = parseToolPayload(withProjectContext as any);
+    expect(withProjectPayload.items[0].content).toContain("cedar green");
+
+    const globalOnlyContext = await fixture.client.callTool({
+      name: "memory_get_context",
+      arguments: {
+        query: "What is my favorite notebook cover color?",
+        max_items: 5,
+      },
+    });
+    const globalOnlyPayload = parseToolPayload(globalOnlyContext as any);
+    expect(globalOnlyPayload.items[0].content).toContain("matte white");
+  });
+
+  it("keeps non-preference get_context ranking behavior unchanged", async () => {
+    const fixture = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
+    });
+    cleanups.push(fixture.cleanup);
+
+    const projectPath = "/tmp/non-preference-ranking-project";
+    const projectScopeId = hashProjectPath(projectPath);
+
+    await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "project", id: projectScopeId },
+        content: "Use pnpm for installs in this repo.",
+      },
+    });
+
+    await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "global" },
+        content: "Favorite notebook cover color: matte white.",
+        tags: ["user-preference", "canonical"],
+      },
+    });
+
+    const context = await fixture.client.callTool({
+      name: "memory_get_context",
+      arguments: {
+        query: "How do we install dependencies in this repo?",
+        project_path: projectPath,
+        max_items: 5,
+      },
+    });
+    const payload = parseToolPayload(context as any);
+    expect(payload.items.length).toBeGreaterThan(0);
+    expect(payload.items[0].content).toContain("pnpm");
+  });
+
+  it("returns canonical preference even when search candidates are saturated by noisy chatter", async () => {
+    const fixture = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
+    });
+    cleanups.push(fixture.cleanup);
+
+    const projectPath = "/tmp/preference-noise-saturation-project";
+    const projectScopeId = hashProjectPath(projectPath);
+
+    await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "global" },
+        content: "Favorite notebook cover color: cedar green.",
+        tags: ["user-preference", "canonical"],
+      },
+    });
+
+    for (let i = 0; i < 160; i += 1) {
+      await fixture.client.callTool({
+        name: "memory_upsert",
+        arguments: {
+          scope: { type: "project", id: projectScopeId },
+          content: `User: What is my current notebook cover color preference? noisy-${i}`,
+          metadata: {
+            captured: true,
+          },
+        },
+      });
+    }
+
+    const context = await fixture.client.callTool({
+      name: "memory_get_context",
+      arguments: {
+        query: "What is my current notebook cover color preference?",
+        project_path: projectPath,
+        max_items: 8,
+      },
+    });
+    const payload = parseToolPayload(context as any);
+
+    expect(payload.items.length).toBeGreaterThan(0);
+    expect(payload.items[0].content).toContain("cedar green");
   });
 
   it("supports cross-agent metadata and concurrent reads/writes", async () => {

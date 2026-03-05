@@ -7,6 +7,11 @@ Use the same `AGENT_MEMORY_HOME` across clients so Codex/Claude share one memory
 
 `memory_search` is client-adaptive by default. Users should not need to prompt for `memory_search_compact` in normal workflows.
 
+## Distribution
+
+This project is currently distributed via source/GitHub only.
+NPM registry publishing is intentionally out of scope for this release.
+
 ## Quick Start (Shortcuts)
 
 ### 1) Install
@@ -24,8 +29,8 @@ Use this MCP server entry in your client config:
 {
   "mcpServers": {
     "agent-memory": {
-      "command": "npx",
-      "args": ["-y", "agent-memory-mcp"],
+      "command": "node",
+      "args": ["/path/to/agent-memory-mcp/dist/index.js"],
       "env": {
         "AGENT_MEMORY_HOME": "$HOME/.agent-memory"
       }
@@ -49,7 +54,6 @@ Use `memory_search` normally. The server shapes payload size by client type:
 
 | Client | `memory_search` behavior |
 |---|---|
-| Claude Desktop | Hard-clamped safe payload caps (`limit<=12`, `max_content_chars<=700`, `max_response_bytes<=180000`) |
 | Claude Code / Codex | Rich defaults (no forced compact caps) |
 | Unknown clients | Adaptive retry: rich first, compact-safe fallback when envelope is too large |
 
@@ -80,7 +84,7 @@ Call `memory_health` from your MCP client. Expected shape:
   "ok": true,
   "db": "ok",
   "embeddings": "ok",
-  "version": "0.1.0 (schema 1)",
+  "version": "0.2.0 (schema 1)",
   "retrieval_mode": "semantic+lexical",
   "embeddings_provider": "ollama",
   "embeddings_reason": "healthy",
@@ -125,6 +129,21 @@ Importer shortcut flags (both scripts):
 2. In another client, retrieve it with `memory_search`.
 3. Confirm both clients return the same fact from shared local storage.
 
+## Canonical Preferences
+
+- Canonical preference memories now enforce **last-write-wins** per `(scope_type, scope_id, canonical_key)`.
+- Canonical key resolution order on write:
+  - `metadata.normalized_key` (if provided)
+  - inferred from content when `tags` includes `canonical` and content matches `Favorite <subject>: <value>`
+- When a canonical key is resolved, the upsert response may include:
+  - `canonical_key`
+  - `replaced_ids` (soft-deleted prior active canonical entries for that key/scope)
+- For preference-intent `memory_get_context` queries (for example, “what is my favorite notebook cover color?”):
+  - active canonical memories are prioritized first
+  - duplicate canonical keys use scope tie-break `session > project > global`, then recency
+  - captured dialogue-like rows (`User:`/`Assistant:` with `metadata.captured=true`) are excluded from the remainder when canonical winners are found
+- `memory_get_context` supports temporal preference prompts (for example, “what used to be my favorite zebra color?”) and may return `canonical_timeline` with active and prior values.
+
 ## Advanced
 
 ### Raw server start
@@ -141,6 +160,7 @@ node dist/wrapper.js --claude --project-path "$HOME/projects/agent-memory" --ses
 ```
 
 `my-session` above is an example session id label. Use any string you want, or omit `--session-id` when using shortcut scripts.
+Add `--debug` to print per-turn memory read/write operations (get-context, upsert, capture).
 
 ### Raw importer commands
 

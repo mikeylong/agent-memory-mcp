@@ -16,6 +16,7 @@ export interface WrapperOptions {
   maxItems: number;
   tokenBudget: number;
   modelCommand?: string;
+  debug: boolean;
   helpRequested?: boolean;
 }
 
@@ -42,6 +43,7 @@ export function parseWrapperArgs(argv: string[], cwd = process.cwd()): WrapperOp
   let maxItems = 12;
   let tokenBudget = 1200;
   let modelCommand: string | undefined;
+  let debug = false;
   let codexMode = false;
   let claudeMode = false;
 
@@ -108,6 +110,11 @@ export function parseWrapperArgs(argv: string[], cwd = process.cwd()): WrapperOp
       continue;
     }
 
+    if (arg === "--debug") {
+      debug = true;
+      continue;
+    }
+
     if (arg === "--help" || arg === "-h") {
       return {
         projectPath,
@@ -115,6 +122,7 @@ export function parseWrapperArgs(argv: string[], cwd = process.cwd()): WrapperOp
         maxItems,
         tokenBudget,
         modelCommand,
+        debug,
         helpRequested: true,
       };
     }
@@ -139,6 +147,7 @@ export function parseWrapperArgs(argv: string[], cwd = process.cwd()): WrapperOp
     maxItems,
     tokenBudget,
     modelCommand: modelCommand ?? shortcutModelCommand,
+    debug,
   };
 }
 
@@ -248,12 +257,21 @@ function helpText(): string {
     "  --model-command <cmd>   Command to execute with wrapped prompt on stdin",
     "  --codex                 Shortcut for: codex exec - --color never --skip-git-repo-check -C <project-path>",
     "  --claude                Shortcut for: claude -p --output-format text",
+    "  --debug                 Print memory read/write operations for each turn",
     "  -h, --help              Show this help text",
     "",
     "Turn behavior (enforced):",
     "  1) Runs memory_get_context equivalent before every prompt",
     "  2) Captures turn transcript and extracted facts after every response",
   ].join("\n");
+}
+
+function isReadlineClosedError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return /readline was closed/i.test(error.message);
 }
 
 async function persistTurn(
@@ -264,7 +282,13 @@ async function persistTurn(
 ): Promise<void> {
   const transcript = `User: ${userPrompt}\nAssistant: ${assistantResponse}`;
 
-  await memory.upsert({
+  if (options.debug) {
+    output.write(
+      `[debug] memory.upsert scope=session id=${options.sessionId} ttl_days=14 tags=turn-log\n`,
+    );
+  }
+
+  const upsertResult = await memory.upsert({
     scope: { type: "session", id: options.sessionId },
     content: transcript,
     importance: 0.35,
@@ -278,14 +302,29 @@ async function persistTurn(
     },
   });
 
-  await memory.capture({
-    scope: { type: "project" },
+  if (options.debug) {
+    output.write(
+      `[debug] memory.upsert result id=${upsertResult.id} created=${upsertResult.created}\n`,
+    );
+    output.write(
+      `[debug] memory.capture scope=project id=${options.projectPath} max_facts=5 tags=captured\n`,
+    );
+  }
+
+  const captureResult = await memory.capture({
+    scope: { type: "project", id: options.projectPath },
     raw_text: transcript,
     summary_hint:
       "Extract persistent decisions, preferences, constraints, owners, deadlines, and repository facts.",
     tags: ["captured"],
     max_facts: 5,
   });
+
+  if (options.debug) {
+    output.write(
+      `[debug] memory.capture result extracted=${captureResult.extracted_count} created=${captureResult.created_ids.length} deduped=${captureResult.deduped_ids.length}\n`,
+    );
+  }
 }
 
 export async function startWrapper(rawArgv = process.argv.slice(2)): Promise<void> {
@@ -315,6 +354,7 @@ export async function startWrapper(rawArgv = process.argv.slice(2)): Promise<voi
     "Memory wrapper started.",
     `project_path=${options.projectPath}`,
     `session_id=${options.sessionId}`,
+    `debug=${options.debug ? "on" : "off"}`,
     options.modelCommand
       ? `model_command=${options.modelCommand}`
       : "model_command=(manual assistant input mode)",
@@ -330,7 +370,18 @@ export async function startWrapper(rawArgv = process.argv.slice(2)): Promise<voi
 
   try {
     while (true) {
-      const userPrompt = (await rl.question("you> ")).trim();
+      let rawPrompt = "";
+      try {
+        rawPrompt = await rl.question("you> ");
+      } catch (error) {
+        if (isReadlineClosedError(error)) {
+          break;
+        }
+
+        throw error;
+      }
+
+      const userPrompt = rawPrompt.trim();
 
       if (!userPrompt) {
         continue;
@@ -340,6 +391,12 @@ export async function startWrapper(rawArgv = process.argv.slice(2)): Promise<voi
         break;
       }
 
+      if (options.debug) {
+        output.write(
+          `[debug] memory.getContext query=${JSON.stringify(userPrompt)} project_path=${options.projectPath} session_id=${options.sessionId} max_items=${options.maxItems} token_budget=${options.tokenBudget}\n`,
+        );
+      }
+
       const context = await memory.getContext({
         query: userPrompt,
         project_path: options.projectPath,
@@ -347,6 +404,12 @@ export async function startWrapper(rawArgv = process.argv.slice(2)): Promise<voi
         max_items: options.maxItems,
         token_budget: options.tokenBudget,
       });
+
+      if (options.debug) {
+        output.write(
+          `[debug] memory.getContext result items=${context.items.length} summary_chars=${context.summary.length}\n`,
+        );
+      }
 
       const wrappedPrompt = composeWrappedPrompt({
         userPrompt,

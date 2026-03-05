@@ -8,9 +8,9 @@ describe("client policy classification", () => {
     expect(resolveClientClass({ clientName: "codex desktop" })).toBe("rich");
   });
 
-  it("classifies Claude Desktop clients as constrained", () => {
-    expect(resolveClientClass({ clientName: "Claude Desktop" })).toBe("constrained");
-    expect(resolveClientClass({ clientName: "claude-desktop" })).toBe("constrained");
+  it("classifies Claude Desktop clients as unknown", () => {
+    expect(resolveClientClass({ clientName: "Claude Desktop" })).toBe("unknown");
+    expect(resolveClientClass({ clientName: "claude-desktop" })).toBe("unknown");
   });
 
   it("classifies unknown clients as unknown", () => {
@@ -40,7 +40,7 @@ describe("client policy classification", () => {
         clientName: "Claude Desktop",
         override: "not-valid",
       }),
-    ).toBe("constrained");
+    ).toBe("unknown");
   });
 });
 
@@ -58,7 +58,7 @@ describe("resolveClientClassFromServer", () => {
 
     try {
       delete process.env.AGENT_MEMORY_CLIENT_CLASS_OVERRIDE;
-      expect(resolveClientClassFromServer(fakeServer)).toBe("constrained");
+      expect(resolveClientClassFromServer(fakeServer)).toBe("unknown");
 
       process.env.AGENT_MEMORY_CLIENT_CLASS_OVERRIDE = "rich";
       expect(resolveClientClassFromServer(fakeServer)).toBe("rich");
@@ -71,4 +71,3 @@ describe("resolveClientClassFromServer", () => {
     }
   });
 });
-
