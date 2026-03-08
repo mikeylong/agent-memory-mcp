@@ -20,11 +20,22 @@ Optional embeddings can improve retrieval ranking.
 This project is currently distributed via source/GitHub only.
 NPM registry publishing is intentionally out of scope for this release.
 
+## Release Model
+
+A release for this project means:
+- a versioned Git commit and annotated git tag
+- a GitHub release with notes
+- a validated source checkout where `npm install`, `npm run build`, and the documented runtime commands work as written
+
+It does **not** mean npm registry publishing for the current release path.
+
 ## Quick Start (Shortcuts)
 
 ### 1) Install
 
 ```bash
+git clone https://github.com/mikeylong/agent-memory-mcp.git
+cd agent-memory-mcp
 npm install
 npm run build
 ```
@@ -239,6 +250,17 @@ agent-memory-import-claude --session-file "$HOME/.claude/projects/<workspace-slu
 npm run import:codex:latest -- --project-path "$HOME/projects/agent-memory"
 npm run import:claude:latest -- --project-path "$HOME/projects/agent-memory"
 ```
+
+## Release Checklist
+
+Before cutting the next GitHub/source release:
+
+1. Confirm the git worktree is clean.
+2. Decide the version bump and update release notes.
+3. Run `npm run release:check`.
+4. Create an annotated tag for the release version.
+5. Publish the GitHub release notes.
+6. State explicitly in the release notes that npm publish is out of scope for this release.
 
 ### Optional client-class override (testing/ops)
 

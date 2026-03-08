@@ -2,8 +2,15 @@
   "name": "agent-memory-mcp",
   "version": "0.2.0",
   "description": "Local cross-agent memory layer over MCP",
+  "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
+  "files": [
+    "dist",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
   "bin": {
     "agent-memory-mcp": "dist/index.js",
     "agent-memory-wrapper": "dist/wrapper.js",
@@ -11,10 +18,26 @@
     "agent-memory-import-claude": "dist/importClaudeSession.js",
     "agent-memory-import-chatgpt": "dist/importChatgptExport.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mikeylong/agent-memory-mcp.git"
+  },
+  "homepage": "https://github.com/mikeylong/agent-memory-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/mikeylong/agent-memory-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "memory",
+    "sqlite",
+    "codex",
+    "claude"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json && mkdir -p dist/db && cp -R src/db/schema dist/db/",
     "dev": "tsx src/index.ts",
     "privacy:scan": "bash scripts/privacy-scan.sh",
+    "release:check": "bash scripts/release-check.sh",
     "wrapper": "tsx src/wrapper.ts",
     "import:codex-session": "tsx src/importCodexSession.ts",
     "import:claude-session": "tsx src/importClaudeSession.ts",
