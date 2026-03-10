@@ -44,11 +44,28 @@ check_regex() {
   local label="$1"
   local pattern="$2"
   local matches
+  local status
 
   if [[ "$SEARCH_TOOL" == "rg" ]]; then
-    matches="$(rg -n --color never --with-filename -e "$pattern" "${TRACKED_FILES[@]}" || true)"
+    set +e
+    matches="$(rg -n --color never --with-filename -e "$pattern" "${TRACKED_FILES[@]}" 2>&1)"
+    status=$?
+    set -e
   else
-    matches="$(grep -nH -E "$pattern" "${TRACKED_FILES[@]}" || true)"
+    set +e
+    matches="$(grep -nH -E -e "$pattern" "${TRACKED_FILES[@]}" 2>&1)"
+    status=$?
+    set -e
+  fi
+
+  if [[ "$status" -gt 1 ]]; then
+    echo "privacy:scan [$label] search error:"
+    echo "$matches"
+    exit "$status"
+  fi
+
+  if [[ "$status" -eq 1 ]]; then
+    matches=""
   fi
 
   if [[ -n "$matches" ]]; then
