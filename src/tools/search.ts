@@ -5,25 +5,31 @@ import { SearchInput } from "../types.js";
 import { resolveClientClassFromServer } from "./clientPolicy.js";
 import {
   buildEffectiveSearchInput,
-  estimateToolEnvelopeBytes,
+  estimateToolEnvelopeBytesForClient,
   shouldFallbackUnknown,
 } from "./searchPolicy.js";
-import { scopeSelectorSchema, toolJsonResult } from "./common.js";
+import {
+  optionalIntSchema,
+  optionalNumberSchema,
+  scopeSelectorSchema,
+  toolJsonResult,
+} from "./common.js";
 
 export function registerSearchTool(server: McpServer, memory: MemoryService): void {
   server.registerTool(
     "memory_search",
     {
       title: "Search Memory",
-      description: "Search memories using lexical and semantic ranking.",
+      description:
+        "Default memory search for normal workflows and rich clients such as Claude Code and Codex; uses lexical and semantic ranking with client-adaptive sizing.",
       inputSchema: {
         query: z.string().default(""),
         scopes: z.array(scopeSelectorSchema).optional(),
-        limit: z.number().min(1).max(200).optional(),
-        min_score: z.number().min(0).max(1).optional(),
+        limit: optionalIntSchema(1, 200),
+        min_score: optionalNumberSchema(0, 1),
         include_metadata: z.boolean().optional(),
-        max_content_chars: z.number().int().min(120).max(50000).optional(),
-        max_response_bytes: z.number().int().min(1000).max(900000).optional(),
+        max_content_chars: optionalIntSchema(120, 50000),
+        max_response_bytes: optionalIntSchema(1000, 900000),
       },
     },
     async (input, _extra) => {
@@ -41,12 +47,17 @@ export function registerSearchTool(server: McpServer, memory: MemoryService): vo
       const primaryInput = buildEffectiveSearchInput(rawSearchInput, clientClass, "primary");
       let result = await memory.search(primaryInput);
 
-      if (shouldFallbackUnknown(clientClass, estimateToolEnvelopeBytes(result))) {
+      if (
+        shouldFallbackUnknown(
+          clientClass,
+          estimateToolEnvelopeBytesForClient("memory_search", result, clientClass),
+        )
+      ) {
         const fallbackInput = buildEffectiveSearchInput(rawSearchInput, clientClass, "fallback");
         result = await memory.search(fallbackInput);
       }
 
-      return toolJsonResult(result);
+      return toolJsonResult(server, "memory_search", result);
     },
   );
 }

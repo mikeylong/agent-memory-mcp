@@ -12,7 +12,7 @@ export function registerHealthTool(server: McpServer, memory: MemoryService): vo
     },
     async () => {
       const result = await memory.health();
-      return toolJsonResult(result);
+      return toolJsonResult(server, "memory_health", result);
     },
   );
 }

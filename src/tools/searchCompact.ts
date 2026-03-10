@@ -1,7 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { MemoryService } from "../memoryService.js";
-import { scopeSelectorSchema, toolJsonResult } from "./common.js";
+import {
+  optionalIntSchema,
+  optionalNumberSchema,
+  scopeSelectorSchema,
+  toolJsonResult,
+} from "./common.js";
 
 export function registerSearchCompactTool(server: McpServer, memory: MemoryService): void {
   server.registerTool(
@@ -9,12 +14,12 @@ export function registerSearchCompactTool(server: McpServer, memory: MemoryServi
     {
       title: "Search Memory (Compact)",
       description:
-        "Optional compact memory search with UI-safe defaults for strict payload-limit clients.",
+        "Fallback compact memory search for strict payload-limit environments; not the default choice for Claude Code or other rich clients.",
       inputSchema: {
         query: z.string().default(""),
         scopes: z.array(scopeSelectorSchema).optional(),
-        limit: z.number().min(1).max(50).optional(),
-        min_score: z.number().min(0).max(1).optional(),
+        limit: optionalIntSchema(1, 50),
+        min_score: optionalNumberSchema(0, 1),
       },
     },
     async (input) => {
@@ -28,7 +33,7 @@ export function registerSearchCompactTool(server: McpServer, memory: MemoryServi
         max_response_bytes: 180000,
       });
 
-      return toolJsonResult(result);
+      return toolJsonResult(server, "memory_search_compact", result);
     },
   );
 }

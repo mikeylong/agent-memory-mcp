@@ -15,7 +15,7 @@ export function registerDeleteTool(server: McpServer, memory: MemoryService): vo
     },
     async (input) => {
       const result = memory.deleteMemory(input.id);
-      return toolJsonResult(result);
+      return toolJsonResult(server, "memory_delete", result);
     },
   );
 }

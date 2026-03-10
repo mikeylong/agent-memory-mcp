@@ -1,7 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { MemoryService } from "../memoryService.js";
-import { scopeRefSchema, toolJsonResult } from "./common.js";
+import {
+  optionalIntSchema,
+  optionalNumberSchema,
+  scopeRefSchema,
+  toolJsonResult,
+} from "./common.js";
 
 export function registerUpsertTool(server: McpServer, memory: MemoryService): void {
   server.registerTool(
@@ -14,8 +19,8 @@ export function registerUpsertTool(server: McpServer, memory: MemoryService): vo
         scope: scopeRefSchema,
         content: z.string().min(1),
         tags: z.array(z.string()).optional(),
-        importance: z.number().min(0).max(1).optional(),
-        ttl_days: z.number().min(1).max(3650).optional(),
+        importance: optionalNumberSchema(0, 1),
+        ttl_days: optionalIntSchema(1, 3650),
         metadata: z.record(z.string(), z.unknown()).optional(),
       },
     },
@@ -30,7 +35,7 @@ export function registerUpsertTool(server: McpServer, memory: MemoryService): vo
         metadata: input.metadata,
       });
 
-      return toolJsonResult(result);
+      return toolJsonResult(server, "memory_upsert", result);
     },
   );
 }

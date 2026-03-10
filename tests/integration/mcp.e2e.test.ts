@@ -47,6 +47,20 @@ function parseToolPayload(result: { content: Array<{ type: string; text?: string
   return JSON.parse(text);
 }
 
+function toolText(result: { content: Array<{ type: string; text?: string }> }): string {
+  const text = result.content.find((entry) => entry.type === "text")?.text;
+  if (!text) {
+    throw new Error("Tool result did not contain text content");
+  }
+
+  return text;
+}
+
+function expectedSearchSummary(payload: { items: unknown[]; total: number }): string {
+  const itemLabel = payload.items.length === 1 ? "item" : "items";
+  return `memory_search returned ${payload.items.length} ${itemLabel} (total ${payload.total}).`;
+}
+
 function sanitizeEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   return Object.fromEntries(
     Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
@@ -191,6 +205,8 @@ describe("agent-memory-mcp integration", () => {
 
     const tools = await fixture.client.listTools();
     const toolNames = tools.tools.map((tool) => tool.name);
+    const searchTool = tools.tools.find((tool) => tool.name === "memory_search");
+    const compactTool = tools.tools.find((tool) => tool.name === "memory_search_compact");
 
     expect(toolNames).toEqual(
       expect.arrayContaining([
@@ -204,6 +220,10 @@ describe("agent-memory-mcp integration", () => {
         "memory_health",
       ]),
     );
+    expect(searchTool?.description).toContain("Default memory search for normal workflows");
+    expect(searchTool?.description).toContain("Claude Code and Codex");
+    expect(compactTool?.description).toContain("Fallback compact memory search");
+    expect(compactTool?.description).toContain("not the default choice for Claude Code");
 
     const invalid = await fixture.client.request(
       {
@@ -225,6 +245,7 @@ describe("agent-memory-mcp integration", () => {
       arguments: {},
     });
     const healthPayload = parseToolPayload(health as any);
+    expect(toolText(health as any)).toBe("memory_health db=ok, embeddings=degraded.");
     expect(healthPayload.embeddings).toBe("degraded");
     expect(healthPayload.embeddings_provider).toBe("disabled");
     expect(healthPayload.embeddings_reason).toBe("disabled_by_config");
@@ -267,6 +288,7 @@ describe("agent-memory-mcp integration", () => {
     });
 
     const searchPayload = parseToolPayload(searchResult as any);
+    expect(toolText(searchResult as any)).toBe(expectedSearchSummary(searchPayload));
     expect(searchPayload.total).toBeGreaterThan(0);
     expect(searchPayload.items[0].content).toContain("pnpm");
 
@@ -280,9 +302,40 @@ describe("agent-memory-mcp integration", () => {
     });
 
     const contextPayload = parseToolPayload(contextResult as any);
+    expect(toolText(contextResult as any)).toBe("memory_get_context returned 1 item.");
     expect(contextPayload.items.length).toBeGreaterThan(0);
     expect(typeof contextPayload.summary).toBe("string");
     expect(contextPayload.scores).toBeTypeOf("object");
+  });
+
+  it("accepts numeric string arguments for memory_search tool inputs", async () => {
+    const fixture = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
+    });
+    cleanups.push(fixture.cleanup);
+
+    await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "global" },
+        content: "BYO Code Flow transcript marker",
+      },
+    });
+
+    const searchResult = await fixture.client.callTool({
+      name: "memory_search",
+      arguments: {
+        query: "BYO Code Flow",
+        limit: "10",
+        min_score: "0.1",
+      },
+    });
+
+    const payload = parseToolPayload(searchResult as any);
+    expect(payload.items.length).toBeGreaterThan(0);
+    expect(toolText(searchResult as any)).toBe(expectedSearchSummary(payload));
   });
 
   it("supports bounded memory_search payloads for strict clients", async () => {
@@ -314,6 +367,7 @@ describe("agent-memory-mcp integration", () => {
 
     const payload = parseToolPayload(searchResult as any);
     const bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+    expect(toolText(searchResult as any)).toBe(expectedSearchSummary(payload));
 
     expect(payload.items.length).toBeGreaterThan(0);
     expect(payload.items[0].content).toContain("[truncated");
@@ -355,6 +409,7 @@ describe("agent-memory-mcp integration", () => {
 
     const payload = parseToolPayload(searchResult as any);
     const bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+    expect(toolText(searchResult as any)).toBe(expectedSearchSummary(payload));
 
     expect(payload.items.length).toBeGreaterThan(0);
     expect(payload.items.length).toBeLessThanOrEqual(12);
@@ -397,10 +452,13 @@ describe("agent-memory-mcp integration", () => {
     });
 
     const payload = parseToolPayload(searchResult as any);
+    const rawBytes = Buffer.byteLength(JSON.stringify(searchResult), "utf8");
 
     expect(payload.items.length).toBeGreaterThan(0);
     expect(payload.items[0].content.length).toBeGreaterThan(900);
     expect(payload.items[0].metadata).toBeTypeOf("object");
+    expect(toolText(searchResult as any)).toBe(expectedSearchSummary(payload));
+    expect(rawBytes).toBeLessThan(8000);
   });
 
   it("uses adaptive fallback for unknown clients when envelope is too large", async () => {
@@ -418,9 +476,9 @@ describe("agent-memory-mcp integration", () => {
     await seedMarkerMemories({
       fixture,
       marker: "unknown-fallback marker",
-      count: 36,
-      contentRepeat: 25000,
-      metadataRepeat: 3000,
+      count: 140,
+      contentRepeat: 50000,
+      metadataRepeat: 50000,
     });
 
     const searchResult = await fixture.client.callTool({
@@ -437,6 +495,7 @@ describe("agent-memory-mcp integration", () => {
 
     const payload = parseToolPayload(searchResult as any);
     const bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+    expect(toolText(searchResult as any)).toBe(expectedSearchSummary(payload));
 
     expect(payload.items.length).toBeGreaterThan(0);
     expect(payload.items.length).toBeLessThanOrEqual(12);

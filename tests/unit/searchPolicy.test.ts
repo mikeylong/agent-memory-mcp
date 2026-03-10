@@ -6,6 +6,7 @@ import {
   UNKNOWN_FALLBACK_ENVELOPE_BYTES,
   buildEffectiveSearchInput,
   estimateToolEnvelopeBytes,
+  estimateToolEnvelopeBytesForClient,
   shouldFallbackUnknown,
 } from "../../src/tools/searchPolicy.js";
 
@@ -81,7 +82,7 @@ describe("search policy input shaping", () => {
 });
 
 describe("search policy payload fallback", () => {
-  it("estimates tool envelope size including structured + text payload", () => {
+  it("estimates tool envelope size including structured payload and summary text", () => {
     const payload = {
       items: [{ id: "1", content: "x".repeat(1200) }],
       total: 1,
@@ -90,6 +91,24 @@ describe("search policy payload fallback", () => {
     const envelopeBytes = estimateToolEnvelopeBytes(payload);
 
     expect(envelopeBytes).toBeGreaterThan(payloadBytes);
+  });
+
+  it("uses the client-adaptive summary envelope for estimation", () => {
+    const payload = {
+      items: [{ id: "1", content: "x".repeat(5000) }],
+      total: 1,
+    };
+
+    const envelopeBytes = estimateToolEnvelopeBytesForClient("memory_search", payload, "rich");
+    const duplicatedJsonEnvelopeBytes = Buffer.byteLength(
+      JSON.stringify({
+        content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+        structuredContent: payload,
+      }),
+      "utf8",
+    );
+
+    expect(envelopeBytes).toBeLessThan(duplicatedJsonEnvelopeBytes);
   });
 
   it("only falls back for unknown clients above threshold", () => {
@@ -101,4 +120,3 @@ describe("search policy payload fallback", () => {
     expect(shouldFallbackUnknown("rich", UNKNOWN_FALLBACK_ENVELOPE_BYTES + 500)).toBe(false);
   });
 });
-

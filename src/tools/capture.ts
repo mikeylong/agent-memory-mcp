@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { MemoryService } from "../memoryService.js";
-import { scopeRefSchema, toolJsonResult } from "./common.js";
+import { optionalIntSchema, scopeRefSchema, toolJsonResult } from "./common.js";
 
 export function registerCaptureTool(server: McpServer, memory: MemoryService): void {
   server.registerTool(
@@ -15,7 +15,7 @@ export function registerCaptureTool(server: McpServer, memory: MemoryService): v
         raw_text: z.string().min(1),
         summary_hint: z.string().optional(),
         tags: z.array(z.string()).optional(),
-        max_facts: z.number().min(1).max(20).optional(),
+        max_facts: optionalIntSchema(1, 20),
       },
     },
     async (input) => {
@@ -27,7 +27,7 @@ export function registerCaptureTool(server: McpServer, memory: MemoryService): v
         max_facts: input.max_facts,
       });
 
-      return toolJsonResult(result);
+      return toolJsonResult(server, "memory_capture", result);
     },
   );
 }

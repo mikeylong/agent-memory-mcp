@@ -16,7 +16,7 @@ export function registerForgetScopeTool(server: McpServer, memory: MemoryService
     },
     async (input) => {
       const result = memory.forgetScope(input.scope, input.before);
-      return toolJsonResult(result);
+      return toolJsonResult(server, "memory_forget_scope", result);
     },
   );
 }

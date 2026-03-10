@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { MemoryService } from "../memoryService.js";
-import { toolJsonResult } from "./common.js";
+import { optionalIntSchema, toolJsonResult } from "./common.js";
 
 export function registerGetContextTool(server: McpServer, memory: MemoryService): void {
   server.registerTool(
@@ -14,8 +14,8 @@ export function registerGetContextTool(server: McpServer, memory: MemoryService)
         query: z.string().default(""),
         project_path: z.string().optional(),
         session_id: z.string().optional(),
-        max_items: z.number().min(1).max(50).optional(),
-        token_budget: z.number().min(200).max(10000).optional(),
+        max_items: optionalIntSchema(1, 50),
+        token_budget: optionalIntSchema(200, 10000),
       },
     },
     async (input) => {
@@ -27,7 +27,7 @@ export function registerGetContextTool(server: McpServer, memory: MemoryService)
         token_budget: input.token_budget,
       });
 
-      return toolJsonResult(result);
+      return toolJsonResult(server, "memory_get_context", result);
     },
   );
 }

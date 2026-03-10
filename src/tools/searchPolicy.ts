@@ -1,10 +1,11 @@
 import { SearchInput } from "../types.js";
 import { ClientClass } from "./clientPolicy.js";
+import { buildToolResultEnvelope } from "./common.js";
 
 export const CONSTRAINED_LIMIT_CAP = 12;
 export const CONSTRAINED_MAX_CONTENT_CHARS = 700;
 export const CONSTRAINED_MAX_RESPONSE_BYTES = 180000;
-export const UNKNOWN_FALLBACK_ENVELOPE_BYTES = 900000;
+export const UNKNOWN_FALLBACK_ENVELOPE_BYTES = 500000;
 
 export interface SearchPayload {
   items: unknown[];
@@ -56,17 +57,15 @@ export function buildEffectiveSearchInput(
 }
 
 export function estimateToolEnvelopeBytes(payload: SearchPayload): number {
-  const structuredContent = payload;
-  const envelope = {
-    content: [
-      {
-        type: "text",
-        text: JSON.stringify(payload, null, 2),
-      },
-    ],
-    structuredContent,
-  };
+  return estimateToolEnvelopeBytesForClient("memory_search", payload, "unknown");
+}
 
+export function estimateToolEnvelopeBytesForClient(
+  toolName: string,
+  payload: SearchPayload,
+  clientClass: ClientClass,
+): number {
+  const envelope = buildToolResultEnvelope(toolName, payload, clientClass);
   return Buffer.byteLength(JSON.stringify(envelope), "utf8");
 }
 
@@ -81,4 +80,3 @@ export function shouldFallbackUnknown(
 
   return envelopeBytes > threshold;
 }
-
