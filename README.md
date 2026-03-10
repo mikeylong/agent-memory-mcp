@@ -5,7 +5,7 @@
 Default data path: `$HOME/.agent-memory/memory.db`.
 Use the same `AGENT_MEMORY_HOME` across clients so Codex/Claude share one memory store.
 
-`memory_search` is client-adaptive by default. Users should not need to prompt for `memory_search_compact` in normal workflows.
+`memory_search` is the default retrieval tool and is client-adaptive by default. Users should not need to prompt for `memory_search_compact` in normal Claude Code or Codex workflows.
 
 ## At a Glance
 
@@ -84,14 +84,14 @@ scripts/claude-memory.sh "$HOME/projects/agent-memory"
 
 ## Client Behavior
 
-Use `memory_search` normally. The server shapes payload size by client type:
+Use `memory_search` as the default retrieval path. The server shapes payload size by client type:
 
 | Client | `memory_search` behavior |
 |---|---|
-| Claude Code / Codex | Rich defaults (no forced compact caps) |
+| Claude Code / Codex | Preferred default; rich defaults with no forced compact caps |
 | Unknown clients | Adaptive retry: rich first, compact-safe fallback when envelope is too large |
 
-`memory_search_compact` remains available as an optional fallback endpoint for strict payload-limit environments.
+`memory_search_compact` remains available as a fallback endpoint for strict payload-limit environments, explicit compact-mode requests, or manual troubleshooting. It should not be the default choice for Claude Code or Codex.
 
 ### 3b) Enable Claude interactive hooks (default recommended path)
 
