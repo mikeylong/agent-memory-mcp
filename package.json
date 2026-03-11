@@ -37,6 +37,7 @@
     "build": "tsc -p tsconfig.json && mkdir -p dist/db && cp -R src/db/schema dist/db/",
     "dev": "tsx src/index.ts",
     "privacy:scan": "bash scripts/privacy-scan.sh",
+    "install:clients": "bash scripts/install-clients.sh",
     "release:check": "bash scripts/release-check.sh",
     "wrapper": "tsx src/wrapper.ts",
     "import:codex-session": "tsx src/importCodexSession.ts",

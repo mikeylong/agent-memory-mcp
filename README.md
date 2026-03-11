@@ -40,22 +40,35 @@ npm install
 npm run build
 ```
 
-### 2) Configure MCP once
+### 2) Configure Codex + Xcode
 
-Use this MCP server entry in your client config:
+Run the repo-local installer:
 
-```json
-{
-  "mcpServers": {
-    "agent-memory": {
-      "command": "node",
-      "args": ["/path/to/agent-memory-mcp/dist/index.js"],
-      "env": {
-        "AGENT_MEMORY_HOME": "$HOME/.agent-memory"
-      }
-    }
-  }
-}
+```bash
+scripts/install-clients.sh
+```
+
+What it does:
+- updates `~/.codex/config.toml` automatically
+- updates `~/Library/Developer/Xcode/CodingAssistant/codex/config.toml` when that verified Xcode config directory already exists
+- skips Xcode config and prints exact manual instructions when Xcode has not created its Codex config directory yet
+- creates timestamped backups before editing existing config files
+- writes config changes atomically so failed updates do not leave partial files behind
+
+Useful installer flags:
+
+```bash
+scripts/install-clients.sh --dry-run
+scripts/install-clients.sh --codex
+scripts/install-clients.sh --xcode
+scripts/install-clients.sh --agent-memory-home "$HOME/.agent-memory"
+scripts/install-clients.sh --force
+```
+
+Optional npm wrapper:
+
+```bash
+npm run install:clients
 ```
 
 Claude Code permissions tip:
@@ -72,15 +85,22 @@ If Claude Code keeps prompting for `agent-memory` tool permissions, allow the wh
 
 This approves all tools from this server (including `memory_get_context` and `memory_capture`), which avoids repeated per-tool prompts.
 
-### 3) Start wrapper shortcuts (Codex + legacy Claude)
+### 3) Sanity check
 
-```bash
-scripts/codex-memory.sh "$HOME/projects/agent-memory"
-scripts/claude-memory.sh "$HOME/projects/agent-memory"
+Restart Codex and Xcode if they were already open, then call `memory_health` from your MCP client. Expected shape:
+
+```json
+{
+  "ok": true,
+  "db": "ok",
+  "embeddings": "ok",
+  "version": "0.2.0 (schema 1)",
+  "retrieval_mode": "semantic+lexical",
+  "embeddings_provider": "ollama",
+  "embeddings_reason": "healthy",
+  "actions": []
+}
 ```
-
-`session_id` is optional in shortcut scripts. If omitted, one is auto-generated.
-`scripts/claude-memory.sh` is a legacy `claude -p` fallback path.
 
 ## Client Behavior
 
@@ -93,7 +113,17 @@ Use `memory_search` as the default retrieval path. The server shapes payload siz
 
 `memory_search_compact` remains available as a fallback endpoint for strict payload-limit environments, explicit compact-mode requests, or manual troubleshooting. It should not be the default choice for Claude Code or Codex.
 
-### 3b) Enable Claude interactive hooks (default recommended path)
+### 4) Start wrapper shortcuts (Codex + legacy Claude)
+
+```bash
+scripts/codex-memory.sh "$HOME/projects/agent-memory"
+scripts/claude-memory.sh "$HOME/projects/agent-memory"
+```
+
+`session_id` is optional in shortcut scripts. If omitted, one is auto-generated.
+`scripts/claude-memory.sh` is a legacy `claude -p` fallback path.
+
+### 4b) Enable Claude interactive hooks (default recommended path)
 
 ```bash
 npm run enable:claude-wrapper
@@ -108,28 +138,11 @@ Behavior notes:
 - slash commands (for example `/mcp`, `/model`) are not captured as memories
 - previous shell wrapper interception (`claude()` -> `claude -p`) is removed
 
-### 4) Import latest sessions (auto-discovery)
+### 5) Import latest sessions (auto-discovery)
 
 ```bash
 scripts/import-codex-session.sh --project-path "$HOME/projects/agent-memory"
 scripts/import-claude-session.sh --project-path "$HOME/projects/agent-memory"
-```
-
-### 5) Sanity check
-
-Call `memory_health` from your MCP client. Expected shape:
-
-```json
-{
-  "ok": true,
-  "db": "ok",
-  "embeddings": "ok",
-  "version": "0.2.0 (schema 1)",
-  "retrieval_mode": "semantic+lexical",
-  "embeddings_provider": "ollama",
-  "embeddings_reason": "healthy",
-  "actions": []
-}
 ```
 
 ### 6) First-run embeddings behavior
@@ -145,6 +158,8 @@ Call `memory_health` from your MCP client. Expected shape:
 
 | Task | Command |
 |---|---|
+| Install Codex + Xcode client config | `scripts/install-clients.sh` |
+| Dry-run installer | `scripts/install-clients.sh --dry-run` |
 | Start Codex with enforced memory | `scripts/codex-memory.sh "$HOME/projects/agent-memory"` |
 | Enable Claude hooks (recommended) | `npm run enable:claude-wrapper && source ~/.zshrc` |
 | Start Claude chat with enforced memory (interactive mode) | `claude` |
@@ -195,6 +210,40 @@ Importer shortcut flags (both scripts):
   - stale `dist` can produce false negatives (for example, old idempotency/canonical logic still active)
 
 ## Advanced
+
+### Manual MCP configuration fallback
+
+If you do not want the installer to edit client config files, add this MCP server entry yourself.
+Use the current `node` executable on your machine if GUI apps need an absolute path.
+
+```toml
+[mcp_servers.agent-memory]
+command = "/absolute/path/to/node"
+args = ["/absolute/path/to/agent-memory-mcp/dist/index.js"]
+enabled = true
+
+[mcp_servers.agent-memory.env]
+AGENT_MEMORY_HOME = "/absolute/path/to/.agent-memory"
+```
+
+Codex target path:
+- `~/.codex/config.toml`
+
+Xcode target path:
+- `~/Library/Developer/Xcode/CodingAssistant/codex/config.toml`
+
+Xcode notes:
+- the installer patches the Xcode config only when that directory already exists, unless you pass `--force`
+- if Xcode has not created its Coding Assistant config yet, open Xcode and launch the Coding Assistant/Codex flow once, then rerun the installer
+- if your Xcode build exposes MCP settings only through UI on this machine, use the same server payload there
+
+### Installer Troubleshooting
+
+- If Xcode has never configured Codex, `~/Library/Developer/Xcode/CodingAssistant/codex` may not exist yet. In that case the installer skips Xcode by default, prints the exact MCP block, and tells you to open Xcode Coding Assistant/Codex once before rerunning.
+- If a config file is read-only or not writable, the installer exits with a path-specific permission error instead of modifying it partially.
+- If the installer detects multiple `agent-memory` sections or another unsupported existing shape, it does not rewrite the file. It prints the manual MCP block so you can reconcile the file yourself.
+- If a write fails after rendering the next config, the installer keeps the original file in place and reports which step failed.
+- Codex keeps `command = "node"` for compatibility with the current config style. Xcode uses an absolute Node path because GUI-launched apps may not inherit the same shell `PATH`.
 
 ### Raw server start
 
