@@ -113,17 +113,15 @@ Use `memory_search` as the default retrieval path. The server shapes payload siz
 
 `memory_search_compact` remains available as a fallback endpoint for strict payload-limit environments, explicit compact-mode requests, or manual troubleshooting. It should not be the default choice for Claude Code or Codex.
 
-### 4) Start wrapper shortcuts (Codex + legacy Claude)
+### 4) Start Codex wrapper shortcut
 
 ```bash
 scripts/codex-memory.sh "$HOME/projects/agent-memory"
-scripts/claude-memory.sh "$HOME/projects/agent-memory"
 ```
 
-`session_id` is optional in shortcut scripts. If omitted, one is auto-generated.
-`scripts/claude-memory.sh` is a legacy `claude -p` fallback path.
+`session_id` is optional. If omitted, one is auto-generated.
 
-### 4b) Enable Claude interactive hooks (default recommended path)
+### 4b) Enable Claude interactive hooks (recommended Claude path)
 
 ```bash
 npm run enable:claude-wrapper
@@ -137,6 +135,7 @@ Behavior notes:
 - fail-open: Claude turn still proceeds if hook memory read/write fails
 - slash commands (for example `/mcp`, `/model`) are not captured as memories
 - previous shell wrapper interception (`claude()` -> `claude -p`) is removed
+- if you need the old print-wrapper behavior for troubleshooting, use `scripts/claude-memory.sh "$HOME/projects/agent-memory"` from the Advanced section below
 
 ### 5) Import latest sessions (auto-discovery)
 
@@ -163,7 +162,6 @@ scripts/import-claude-session.sh --project-path "$HOME/projects/agent-memory"
 | Start Codex with enforced memory | `scripts/codex-memory.sh "$HOME/projects/agent-memory"` |
 | Enable Claude hooks (recommended) | `npm run enable:claude-wrapper && source ~/.zshrc` |
 | Start Claude chat with enforced memory (interactive mode) | `claude` |
-| Legacy Claude print-wrapper fallback | `scripts/claude-memory.sh "$HOME/projects/agent-memory"` |
 | Import latest Codex session | `scripts/import-codex-session.sh --project-path "$HOME/projects/agent-memory"` |
 | Import latest Claude session | `scripts/import-claude-session.sh --project-path "$HOME/projects/agent-memory"` |
 | Import a specific Codex session file | `scripts/import-codex-session.sh --session-file "$HOME/.codex/sessions/YYYY/MM/DD/rollout-<id>.jsonl" --project-path "$HOME/projects/agent-memory"` |
@@ -256,6 +254,7 @@ node dist/index.js
 ```bash
 node dist/wrapper.js --codex --project-path "$HOME/projects/agent-memory" --session-id my-session
 node dist/wrapper.js --claude --project-path "$HOME/projects/agent-memory" --session-id my-session
+scripts/claude-memory.sh "$HOME/projects/agent-memory"
 ```
 
 `--claude` above is a legacy print-wrapper path (`claude -p`). Prefer hook-based Claude setup via `npm run enable:claude-wrapper`.
