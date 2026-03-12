@@ -50,7 +50,18 @@ describe("tool result summaries", () => {
       summarizeToolPayload("memory_forget_scope", { deleted_count: 2 }, "rich"),
     ).toBe("memory_forget_scope deleted 2 memories.");
     expect(
-      summarizeToolPayload("memory_health", { db: "ok", embeddings: "degraded" }, "rich"),
-    ).toBe("memory_health db=ok, embeddings=degraded.");
+      summarizeToolPayload(
+        "memory_health",
+        {
+          db: "ok",
+          embeddings: "degraded",
+          stats: {
+            memories: { active: 12 },
+            storage: { db_size_bytes: 1048576 },
+          },
+        },
+        "rich",
+      ),
+    ).toBe("memory_health db=ok, embeddings=degraded, active=12, db_mb=1.");
   });
 });

@@ -12,12 +12,21 @@ import { OllamaEmbeddingsProvider } from "./embeddings/ollama.js";
 import { MemoryService } from "./memoryService.js";
 import { ScopeRef } from "./types.js";
 
-interface ImportOptions {
+export interface ImportOptions {
   sessionFile: string;
   projectPath: string;
   scopeType: "global" | "project" | "session";
   sessionId: string;
   maxFacts: number;
+}
+
+export interface ImportOutput {
+  imported_messages: number;
+  transcript_characters: number;
+  transcript_session_id: string;
+  capture_scope: ScopeRef;
+  upsert: Awaited<ReturnType<MemoryService["upsert"]>>;
+  capture: Awaited<ReturnType<MemoryService["capture"]>>;
 }
 
 interface SessionMessage {
@@ -63,7 +72,7 @@ function parsePositiveInt(value: string, flag: string): number {
   return parsed;
 }
 
-function defaultSessionIdFromFile(filePath: string): string {
+export function defaultSessionIdFromFile(filePath: string): string {
   const base = path.basename(filePath, path.extname(filePath));
   return `import-${base}`.slice(0, 120);
 }
@@ -252,7 +261,7 @@ function resolveScope(options: ImportOptions): ScopeRef {
   };
 }
 
-async function runImport(options: ImportOptions): Promise<void> {
+export async function runImport(options: ImportOptions): Promise<ImportOutput> {
   if (!fs.existsSync(options.sessionFile)) {
     throw new Error(`Session file not found: ${options.sessionFile}`);
   }
@@ -305,7 +314,7 @@ async function runImport(options: ImportOptions): Promise<void> {
       max_facts: Math.min(100, options.maxFacts),
     });
 
-    const output = {
+    return {
       imported_messages: messages.length,
       transcript_characters: transcript.length,
       transcript_session_id: options.sessionId,
@@ -313,8 +322,6 @@ async function runImport(options: ImportOptions): Promise<void> {
       upsert: upsertResult,
       capture: captureResult,
     };
-
-    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
   } finally {
     db.close();
   }
@@ -322,7 +329,8 @@ async function runImport(options: ImportOptions): Promise<void> {
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
-  await runImport(options);
+  const output = await runImport(options);
+  process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
 }
 
 const isDirectExecution =

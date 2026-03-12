@@ -245,13 +245,32 @@ describe("agent-memory-mcp integration", () => {
       arguments: {},
     });
     const healthPayload = parseToolPayload(health as any);
-    expect(toolText(health as any)).toBe("memory_health db=ok, embeddings=degraded.");
+    expect(toolText(health as any)).toBe("memory_health db=ok, embeddings=degraded, active=0, db_mb=0.");
     expect(healthPayload.embeddings).toBe("degraded");
     expect(healthPayload.embeddings_provider).toBe("disabled");
     expect(healthPayload.embeddings_reason).toBe("disabled_by_config");
     expect(healthPayload.retrieval_mode).toBe("lexical-only");
     expect(Array.isArray(healthPayload.actions)).toBe(true);
     expect(healthPayload.actions.length).toBeGreaterThan(0);
+    expect(healthPayload.stats.memories).toEqual({
+      total: 0,
+      active: 0,
+      soft_deleted: 0,
+      expired_active: 0,
+    });
+    expect(healthPayload.stats.scopes).toEqual({
+      global: 0,
+      project: 0,
+      session: 0,
+    });
+    expect(healthPayload.stats.embeddings).toEqual({
+      rows: 0,
+      bytes: 0,
+      avg_bytes: 0,
+    });
+    expect(healthPayload.stats.storage.idempotency_keys).toBe(0);
+    expect(healthPayload.stats.storage.max_content_bytes).toBe(0);
+    expect(healthPayload.stats.storage.db_size_bytes).toBeGreaterThan(0);
   });
 
   it("supports upsert -> search -> get_context workflow", async () => {
@@ -559,6 +578,8 @@ describe("agent-memory-mcp integration", () => {
     expect(healthyPayload.embeddings_provider).toBe("ollama");
     expect(healthyPayload.embeddings_reason).toBe("healthy");
     expect(healthyPayload.actions).toEqual([]);
+    expect(healthyPayload.stats.memories.active).toBe(0);
+    expect(healthyPayload.stats.storage.idempotency_keys).toBe(0);
 
     const degradedFixture = await createClientFixture({
       envOverrides: {
@@ -578,6 +599,8 @@ describe("agent-memory-mcp integration", () => {
     expect(degradedPayload.embeddings_reason).toBe("provider_unreachable");
     expect(Array.isArray(degradedPayload.actions)).toBe(true);
     expect(degradedPayload.actions.length).toBeGreaterThan(0);
+    expect(degradedPayload.stats.memories.active).toBe(0);
+    expect(degradedPayload.stats.storage.idempotency_keys).toBe(0);
 
     const upsert = await degradedFixture.client.callTool({
       name: "memory_upsert",

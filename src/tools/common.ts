@@ -51,6 +51,17 @@ function asString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function asObject(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function formatMegabytes(bytes: number): string {
+  const megabytes = Math.round((bytes / (1024 * 1024)) * 10) / 10;
+  return Number.isInteger(megabytes) ? String(megabytes) : megabytes.toFixed(1);
+}
+
 export function summarizeToolPayload(toolName: string, payload: JsonObject, _clientClass: ClientClass): string {
   const record = payload as Record<string, unknown>;
 
@@ -89,6 +100,16 @@ export function summarizeToolPayload(toolName: string, payload: JsonObject, _cli
     case "memory_health": {
       const db = asString(record.db) ?? "unknown";
       const embeddings = asString(record.embeddings) ?? "unknown";
+      const stats = asObject(record.stats);
+      const memories = asObject(stats?.memories);
+      const storage = asObject(stats?.storage);
+      const active = asCount(memories?.active);
+      const dbBytes = asCount(storage?.db_size_bytes);
+
+      if (active !== null && dbBytes !== null) {
+        return `memory_health db=${db}, embeddings=${embeddings}, active=${active}, db_mb=${formatMegabytes(dbBytes)}.`;
+      }
+
       return `memory_health db=${db}, embeddings=${embeddings}.`;
     }
     default:

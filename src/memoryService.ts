@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 import type { RunResult } from "better-sqlite3";
@@ -74,6 +75,30 @@ export type RetrievalMode = "semantic+lexical" | "lexical-only";
 export type EmbeddingsProviderKind = "ollama" | "disabled";
 export type EmbeddingsReason = "healthy" | "disabled_by_config" | "provider_unreachable";
 
+export interface MemoryHealthStats {
+  memories: {
+    total: number;
+    active: number;
+    soft_deleted: number;
+    expired_active: number;
+  };
+  scopes: {
+    global: number;
+    project: number;
+    session: number;
+  };
+  embeddings: {
+    rows: number;
+    bytes: number;
+    avg_bytes: number;
+  };
+  storage: {
+    db_size_bytes: number;
+    idempotency_keys: number;
+    max_content_bytes: number;
+  };
+}
+
 export interface MemoryHealthStatus {
   [key: string]: unknown;
   ok: boolean;
@@ -84,6 +109,7 @@ export interface MemoryHealthStatus {
   embeddings_provider: EmbeddingsProviderKind;
   embeddings_reason: EmbeddingsReason;
   actions: string[];
+  stats: MemoryHealthStats;
 }
 
 function parseJson<T>(value: string | null, fallback: T): T {
@@ -189,6 +215,18 @@ function normalizeFtsQuery(input: string): string {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function toWholeNumber(value: unknown): number {
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+
+  return 0;
 }
 
 function healthActions(reason: EmbeddingsReason): string[] {
@@ -427,6 +465,107 @@ export class MemoryService {
 
   private get db() {
     return this.memoryDb.db;
+  }
+
+  private dbFileSizeBytes(): number {
+    try {
+      if (this.memoryDb.path !== ":memory:" && fs.existsSync(this.memoryDb.path)) {
+        return fs.statSync(this.memoryDb.path).size;
+      }
+    } catch {
+      // Fall back to page counts if the file path is not stat-able.
+    }
+
+    const pageCount = toWholeNumber(this.db.prepare("PRAGMA page_count").pluck().get());
+    const pageSize = toWholeNumber(this.db.prepare("PRAGMA page_size").pluck().get());
+    return pageCount * pageSize;
+  }
+
+  private collectHealthStats(): MemoryHealthStats {
+    const aggregate = this.db
+      .prepare(
+        `
+          SELECT
+            COUNT(*) AS total_memories,
+            COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END), 0) AS active_memories,
+            COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS soft_deleted_memories,
+            COALESCE(
+              SUM(
+                CASE
+                  WHEN expires_at IS NOT NULL AND expires_at < ? AND deleted_at IS NULL THEN 1
+                  ELSE 0
+                END
+              ),
+              0
+            ) AS expired_active_memories,
+            COALESCE(SUM(CASE WHEN embedding_json IS NOT NULL AND deleted_at IS NULL THEN 1 ELSE 0 END), 0) AS embedding_rows,
+            COALESCE(
+              SUM(CASE WHEN embedding_json IS NOT NULL AND deleted_at IS NULL THEN LENGTH(embedding_json) ELSE 0 END),
+              0
+            ) AS embedding_bytes,
+            COALESCE(MAX(CASE WHEN deleted_at IS NULL THEN LENGTH(content) END), 0) AS max_content_bytes
+          FROM memories
+        `,
+      )
+      .get(nowIso()) as {
+      total_memories: unknown;
+      active_memories: unknown;
+      soft_deleted_memories: unknown;
+      expired_active_memories: unknown;
+      embedding_rows: unknown;
+      embedding_bytes: unknown;
+      max_content_bytes: unknown;
+    };
+
+    const scopeRows = this.db
+      .prepare(
+        `
+          SELECT scope_type, COUNT(*) AS count
+          FROM memories
+          WHERE deleted_at IS NULL
+          GROUP BY scope_type
+        `,
+      )
+      .all() as Array<{
+      scope_type: "global" | "project" | "session";
+      count: unknown;
+    }>;
+
+    const scopeCounts: MemoryHealthStats["scopes"] = {
+      global: 0,
+      project: 0,
+      session: 0,
+    };
+    for (const row of scopeRows) {
+      scopeCounts[row.scope_type] = toWholeNumber(row.count);
+    }
+
+    const idempotencyKeys = this.db
+      .prepare("SELECT COUNT(*) AS count FROM idempotency_keys")
+      .get() as { count: unknown };
+
+    const embeddingRows = toWholeNumber(aggregate.embedding_rows);
+    const embeddingBytes = toWholeNumber(aggregate.embedding_bytes);
+
+    return {
+      memories: {
+        total: toWholeNumber(aggregate.total_memories),
+        active: toWholeNumber(aggregate.active_memories),
+        soft_deleted: toWholeNumber(aggregate.soft_deleted_memories),
+        expired_active: toWholeNumber(aggregate.expired_active_memories),
+      },
+      scopes: scopeCounts,
+      embeddings: {
+        rows: embeddingRows,
+        bytes: embeddingBytes,
+        avg_bytes: embeddingRows > 0 ? Math.round(embeddingBytes / embeddingRows) : 0,
+      },
+      storage: {
+        db_size_bytes: this.dbFileSizeBytes(),
+        idempotency_keys: toWholeNumber(idempotencyKeys.count),
+        max_content_bytes: toWholeNumber(aggregate.max_content_bytes),
+      },
+    };
   }
 
   private async embedSafe(texts: string[]): Promise<number[][] | null> {
@@ -1390,6 +1529,7 @@ export class MemoryService {
           : "provider_unreachable";
     const retrievalMode: RetrievalMode =
       embeddingState === "ok" ? "semantic+lexical" : "lexical-only";
+    const stats = this.collectHealthStats();
 
     return {
       ok: dbState === "ok",
@@ -1400,6 +1540,7 @@ export class MemoryService {
       embeddings_provider: embeddingsProvider,
       embeddings_reason: embeddingsReason,
       actions: healthActions(embeddingsReason),
+      stats,
     };
   }
 }

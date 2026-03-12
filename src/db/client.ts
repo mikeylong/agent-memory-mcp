@@ -6,8 +6,10 @@ import { enforceFilePermissions } from "../config.js";
 
 export class MemoryDb {
   readonly db: Database;
+  readonly path: string;
 
   constructor(dbPath: string) {
+    this.path = dbPath;
     fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
     this.db = new BetterSqlite3(dbPath);
 

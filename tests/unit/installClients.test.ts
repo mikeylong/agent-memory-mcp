@@ -19,7 +19,49 @@ function createRepoFixture(): string {
   const repoPath = tempDir("agent-memory-install-repo-");
   fs.mkdirSync(path.join(repoPath, "dist"), { recursive: true });
   fs.writeFileSync(path.join(repoPath, "dist", "index.js"), "console.log('ok')\n", "utf8");
+  writeAutomationBootstrapFixture(repoPath, makeAutomationReport(repoPath, repoPath, []));
   return repoPath;
+}
+
+function makeAutomationReport(repoPath: string, projectPath: string, presentNames: string[]) {
+  const names = [
+    "Memory health drift",
+    "Memory import sync",
+    "Memory QA smoke",
+    "Memory cleanup",
+  ];
+
+  return {
+    project_path: projectPath,
+    repo_path: repoPath,
+    codex_home: path.join("/tmp", ".codex"),
+    summary: {
+      total: names.length,
+      present: presentNames.length,
+      missing: names.length - presentNames.length,
+    },
+    automations: names.map((name) => ({
+      name,
+      prompt: `${name} prompt`,
+      rrule: `${name} schedule`,
+      status: "ACTIVE",
+      cwds: [repoPath],
+      presence: presentNames.includes(name) ? "present" : "missing",
+      matching_ids: presentNames.includes(name) ? [name.toLowerCase().replace(/\s+/g, "-")] : [],
+      matching_paths: [],
+    })),
+  };
+}
+
+function writeAutomationBootstrapFixture(repoPath: string, report: unknown): void {
+  fs.writeFileSync(
+    path.join(repoPath, "dist", "automationBootstrap.js"),
+    [
+      "#!/usr/bin/env node",
+      `process.stdout.write(${JSON.stringify(`${JSON.stringify(report, null, 2)}\n`)});`,
+    ].join("\n"),
+    "utf8",
+  );
 }
 
 function runInstaller(args: string[], homeDir: string, repoPath: string, extraEnv: Record<string, string> = {}) {
@@ -98,6 +140,49 @@ describe("install-clients.sh", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("Mode: dry-run");
     expect(fs.existsSync(path.join(homeDir, ".codex", "config.toml"))).toBe(false);
+  });
+
+  it("prints recommended automations with missing entries after installation", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+    const projectPath = path.join(homeDir, "workspace");
+    fs.mkdirSync(projectPath, { recursive: true });
+    writeAutomationBootstrapFixture(repoPath, makeAutomationReport(repoPath, projectPath, []));
+
+    const result = runInstaller(["--codex", "--project-path", projectPath], homeDir, repoPath);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Recommended automations:");
+    expect(result.stdout).toContain(`Target project path: ${projectPath}`);
+    expect(result.stdout).toContain("Already present: none");
+    expect(result.stdout).toContain(
+      "Missing: Memory health drift, Memory import sync, Memory QA smoke, Memory cleanup",
+    );
+    expect(result.stdout).toContain("Codex next step: run npm run -s automation:bootstrap -- --project-path");
+  });
+
+  it("reports when all recommended automations are already present", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+    const projectPath = path.join(homeDir, "workspace");
+    const presentNames = [
+      "Memory health drift",
+      "Memory import sync",
+      "Memory QA smoke",
+      "Memory cleanup",
+    ];
+    fs.mkdirSync(projectPath, { recursive: true });
+    writeAutomationBootstrapFixture(repoPath, makeAutomationReport(repoPath, projectPath, presentNames));
+
+    const result = runInstaller(["--codex", "--project-path", projectPath], homeDir, repoPath);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Recommended automations:");
+    expect(result.stdout).toContain(
+      "Already present: Memory health drift, Memory import sync, Memory QA smoke, Memory cleanup",
+    );
+    expect(result.stdout).toContain("Missing: none");
+    expect(result.stdout).toContain("Codex next step: all recommended automations are already present.");
   });
 
   it("prints manual follow-up when the Xcode config directory is unavailable", () => {
