@@ -14,6 +14,7 @@ Options:
   --xcode                     Configure Xcode only
   --all                       Configure both clients (default)
   --agent-memory-home <path>  Set AGENT_MEMORY_HOME (default: $HOME/.agent-memory)
+  --project-path <path>       Workspace path to use for recommended automation setup (default: pwd)
   --repo-path <path>          Repo path containing dist/index.js (default: script repo root)
   --dry-run                   Print planned changes without writing files
   --force                     Create Xcode config directory if it is missing
@@ -22,6 +23,7 @@ Options:
 Examples:
   scripts/install-clients.sh
   scripts/install-clients.sh --codex --dry-run
+  scripts/install-clients.sh --codex --project-path "$HOME/projects/agent-memory"
   scripts/install-clients.sh --xcode --force
 EOF
 }
@@ -45,6 +47,7 @@ timestamp() {
 }
 
 AGENT_MEMORY_HOME="${HOME}/.agent-memory"
+AUTOMATION_PROJECT_PATH="$(pwd)"
 REPO_PATH="$ROOT_DIR"
 TARGET_CODEX=0
 TARGET_XCODE=0
@@ -69,6 +72,11 @@ while [[ $# -gt 0 ]]; do
     --agent-memory-home)
       [[ $# -ge 2 ]] || die "--agent-memory-home requires a value"
       AGENT_MEMORY_HOME="$2"
+      shift 2
+      ;;
+    --project-path)
+      [[ $# -ge 2 ]] || die "--project-path requires a value"
+      AUTOMATION_PROJECT_PATH="$2"
       shift 2
       ;;
     --repo-path)
@@ -102,9 +110,11 @@ fi
 command -v node >/dev/null 2>&1 || die "node is required but was not found in PATH"
 
 REPO_PATH="$(realpath_fallback "$REPO_PATH")"
+AUTOMATION_PROJECT_PATH="$(realpath_fallback "$AUTOMATION_PROJECT_PATH")"
 SERVER_PATH="$REPO_PATH/dist/index.js"
 
 [[ "$REPO_PATH" = /* ]] || die "--repo-path must resolve to an absolute path"
+[[ "$AUTOMATION_PROJECT_PATH" = /* ]] || die "--project-path must resolve to an absolute path"
 [[ -f "$SERVER_PATH" ]] || die "Built server not found at $SERVER_PATH. Run npm install && npm run build first."
 
 NODE_COMMAND="$(command -v node)"
@@ -113,6 +123,7 @@ NODE_COMMAND="$(command -v node)"
 declare -a CHANGED=()
 declare -a SKIPPED=()
 declare -a FOLLOW_UP=()
+declare -a AUTOMATION_RECOMMENDATIONS=()
 
 backup_file() {
   local file_path="$1"
@@ -524,6 +535,66 @@ install_xcode() {
   FOLLOW_UP+=("3. If Xcode uses a UI-only MCP settings flow on this machine, add the same server payload there.")
 }
 
+collect_automation_recommendations() {
+  local bootstrap_script="${REPO_PATH}/dist/automationBootstrap.js"
+
+  if [[ ! -f "$bootstrap_script" ]]; then
+    AUTOMATION_RECOMMENDATIONS+=("Bootstrap helper not found at $bootstrap_script")
+    AUTOMATION_RECOMMENDATIONS+=("Codex next step: run npm run -s automation:bootstrap -- --project-path \"$AUTOMATION_PROJECT_PATH\" after rebuilding the repo.")
+    return 0
+  fi
+
+  local bootstrap_output
+  if ! bootstrap_output="$("$NODE_COMMAND" "$bootstrap_script" --project-path "$AUTOMATION_PROJECT_PATH")"; then
+    AUTOMATION_RECOMMENDATIONS+=("Could not read recommended automation status from $bootstrap_script")
+    AUTOMATION_RECOMMENDATIONS+=("Codex next step: run npm run -s automation:bootstrap -- --project-path \"$AUTOMATION_PROJECT_PATH\" after rebuilding the repo.")
+    return 0
+  fi
+
+  local formatted_lines
+  if ! formatted_lines="$(
+    BOOTSTRAP_JSON="$bootstrap_output" node <<'EOF'
+const report = JSON.parse(process.env.BOOTSTRAP_JSON ?? "{}");
+const automations = Array.isArray(report.automations) ? report.automations : [];
+const present = automations
+  .filter((automation) => automation.presence === "present")
+  .map((automation) => automation.name);
+const missing = automations
+  .filter((automation) => automation.presence === "missing")
+  .map((automation) => automation.name);
+const lines = [
+  `Target project path: ${report.project_path ?? ""}`,
+  `Already present: ${present.length > 0 ? present.join(", ") : "none"}`,
+  `Missing: ${missing.length > 0 ? missing.join(", ") : "none"}`,
+];
+
+if (report.project_path === report.repo_path) {
+  lines.push(
+    "This target matches the current working directory. Pass --project-path to point import sync at another workspace.",
+  );
+}
+
+if (missing.length > 0) {
+  lines.push(
+    `Codex next step: run npm run -s automation:bootstrap -- --project-path ${JSON.stringify(report.project_path)} and create the missing automations from the JSON output.`,
+  );
+} else {
+  lines.push("Codex next step: all recommended automations are already present.");
+}
+
+process.stdout.write(lines.join("\n"));
+EOF
+  )"; then
+    AUTOMATION_RECOMMENDATIONS+=("Could not format recommended automation status from bootstrap output")
+    AUTOMATION_RECOMMENDATIONS+=("Codex next step: run npm run -s automation:bootstrap -- --project-path \"$AUTOMATION_PROJECT_PATH\" manually.")
+    return 0
+  fi
+
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && AUTOMATION_RECOMMENDATIONS+=("$line")
+  done <<< "$formatted_lines"
+}
+
 print_summary() {
   echo "agent-memory client installer"
   echo "Repo path: $REPO_PATH"
@@ -562,6 +633,16 @@ print_summary() {
       echo "- $item"
     done
   fi
+
+  echo
+  echo "Recommended automations:"
+  if [[ ${#AUTOMATION_RECOMMENDATIONS[@]} -eq 0 ]]; then
+    echo "- none"
+  else
+    for item in "${AUTOMATION_RECOMMENDATIONS[@]}"; do
+      echo "- $item"
+    done
+  fi
 }
 
 if [[ $TARGET_CODEX -eq 1 ]]; then
@@ -571,5 +652,7 @@ fi
 if [[ $TARGET_XCODE -eq 1 ]]; then
   install_xcode
 fi
+
+collect_automation_recommendations
 
 print_summary

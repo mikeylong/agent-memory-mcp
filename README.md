@@ -94,13 +94,46 @@ Restart Codex and Xcode if they were already open, then call `memory_health` fro
   "ok": true,
   "db": "ok",
   "embeddings": "ok",
-  "version": "0.2.0 (schema 1)",
+  "version": "0.2.0 (schema 3)",
   "retrieval_mode": "semantic+lexical",
   "embeddings_provider": "ollama",
   "embeddings_reason": "healthy",
-  "actions": []
+  "actions": [],
+  "stats": {
+    "memories": {
+      "total": 0,
+      "active": 0,
+      "soft_deleted": 0,
+      "expired_active": 0
+    },
+    "scopes": {
+      "global": 0,
+      "project": 0,
+      "session": 0
+    },
+    "embeddings": {
+      "rows": 0,
+      "bytes": 0,
+      "avg_bytes": 0
+    },
+    "storage": {
+      "db_size_bytes": 0,
+      "idempotency_keys": 0,
+      "max_content_bytes": 0
+    }
+  }
 }
 ```
+
+### 4) Recommended automations
+
+Use the bootstrap command to print the four recommended Codex automations for a workspace, including whether each one already exists under `~/.codex/automations`:
+
+```bash
+npm run -s automation:bootstrap -- --project-path "$HOME/projects/agent-memory"
+```
+
+The bootstrap output is the onboarding source of truth for automation name, schedule, prompt, repo cwd, and present-or-missing status. If you omit `--project-path`, it defaults to the current working directory.
 
 ## Client Behavior
 
@@ -113,7 +146,7 @@ Use `memory_search` as the default retrieval path. The server shapes payload siz
 
 `memory_search_compact` remains available as a fallback endpoint for strict payload-limit environments, explicit compact-mode requests, or manual troubleshooting. It should not be the default choice for Claude Code or Codex.
 
-### 4) Start Codex wrapper shortcut
+### 5) Start Codex wrapper shortcut
 
 ```bash
 scripts/codex-memory.sh "$HOME/projects/agent-memory"
@@ -121,7 +154,7 @@ scripts/codex-memory.sh "$HOME/projects/agent-memory"
 
 `session_id` is optional. If omitted, one is auto-generated.
 
-### 4b) Enable Claude interactive hooks (recommended Claude path)
+### 5b) Enable Claude interactive hooks (recommended Claude path)
 
 ```bash
 npm run enable:claude-wrapper
@@ -137,14 +170,14 @@ Behavior notes:
 - previous shell wrapper interception (`claude()` -> `claude -p`) is removed
 - if you need the old print-wrapper behavior for troubleshooting, use `scripts/claude-memory.sh "$HOME/projects/agent-memory"` from the Advanced section below
 
-### 5) Import latest sessions (auto-discovery)
+### 6) Import latest sessions (auto-discovery)
 
 ```bash
 scripts/import-codex-session.sh --project-path "$HOME/projects/agent-memory"
 scripts/import-claude-session.sh --project-path "$HOME/projects/agent-memory"
 ```
 
-### 6) First-run embeddings behavior
+### 7) First-run embeddings behavior
 
 - `agent-memory-mcp` does **not** auto-install Ollama.
 - If Ollama is unavailable, the server still works in lexical-only mode and `memory_health` reports degraded embeddings with actionable `actions`.
@@ -164,6 +197,12 @@ scripts/import-claude-session.sh --project-path "$HOME/projects/agent-memory"
 | Start Claude chat with enforced memory (interactive mode) | `claude` |
 | Import latest Codex session | `scripts/import-codex-session.sh --project-path "$HOME/projects/agent-memory"` |
 | Import latest Claude session | `scripts/import-claude-session.sh --project-path "$HOME/projects/agent-memory"` |
+| Show recommended Codex automations | `npm run -s automation:bootstrap -- --project-path "$HOME/projects/agent-memory"` |
+| Run daily health drift report | `npm run -s automation:health-drift` |
+| Sync latest Codex + Claude sessions | `npm run -s automation:import-sync -- --project-path "$HOME/projects/agent-memory"` |
+| Run retrieval QA smoke test | `npm run -s automation:retrieval-qa` |
+| Preview selective cleanup candidates | `npm run -s automation:cleanup -- --dry-run` |
+| Apply selective cleanup policy | `npm run -s automation:cleanup -- --apply` |
 | Import a specific Codex session file | `scripts/import-codex-session.sh --session-file "$HOME/.codex/sessions/YYYY/MM/DD/rollout-<id>.jsonl" --project-path "$HOME/projects/agent-memory"` |
 | Import a specific Claude session file | `scripts/import-claude-session.sh --session-file "$HOME/.claude/projects/<workspace-slug>/<session-id>.jsonl" --project-path "$HOME/projects/agent-memory"` |
 | Import into session scope | `scripts/import-codex-session.sh --scope session --session-id replay-01` |
@@ -175,6 +214,38 @@ Importer shortcut flags (both scripts):
 - `--session-id <id>` only when `--scope session`
 - `--max-facts <n>` default `25`
 - `-h|--help`
+
+## Automation Jobs
+
+Start with the bootstrap command when you want the recommended Codex automation set for a workspace:
+
+- `npm run -s automation:bootstrap -- --project-path <path>`
+  - prints deterministic JSON that includes the four canonical automation definitions
+  - marks each one `present` or `missing` by checking `~/.codex/automations`
+  - is the onboarding entry point for creating any missing automations
+
+The repo also includes four automation-oriented CLIs that those recurring jobs call:
+
+- `npm run -s automation:health-drift`
+  - records `memory_health` snapshots under `$AGENT_MEMORY_HOME/automation-state/health-drift-history.json`
+  - reports day/week deltas and threshold breaches for DB growth, active-memory growth, expired-active streaks, idempotency growth, and large content outliers
+- `npm run -s automation:import-sync -- --project-path <path>`
+  - imports the latest Codex and Claude sessions into the given project scope
+  - records import state under `$AGENT_MEMORY_HOME/automation-state/import-sync-state.json`
+  - skips reruns when the latest session file has not changed
+- `npm run -s automation:retrieval-qa`
+  - writes a temporary canonical-preference smoke fixture
+  - verifies `memory_search` and `memory_get_context` return the latest canonical answer
+  - deletes the temporary session scope before exiting
+- `npm run -s automation:cleanup -- --dry-run|--apply [--before <iso>]`
+  - applies the fixed moderate cleanup policy
+  - eligible rows:
+    - expired memories older than 7 days
+    - captured rows older than 45 days
+  - excluded rows:
+    - any memory with `canonical_key`
+    - any memory tagged `canonical` or `user-preference`
+  - `--dry-run` is the default; use `--apply` to perform the cleanup
 
 ## Cross-Agent Verification
 
