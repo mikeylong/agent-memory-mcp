@@ -54,7 +54,7 @@ describe("automation bootstrap recommendations", () => {
   it("returns the four canonical automation definitions with missing presence by default", () => {
     const codexHome = tempDir("agent-memory-bootstrap-codex-");
     const repoPath = tempDir("agent-memory-bootstrap-repo-");
-    const projectPath = "/Users/example/workspace";
+    const projectPath = "/path/to/workspace";
 
     const report = buildAutomationBootstrapReport({
       projectPath,
@@ -113,7 +113,7 @@ describe("automation bootstrap recommendations", () => {
   it("marks automations as present when matching TOMLs already exist", () => {
     const codexHome = tempDir("agent-memory-bootstrap-codex-");
     const repoPath = tempDir("agent-memory-bootstrap-repo-");
-    const projectPath = "/Users/example/workspace";
+    const projectPath = "/path/to/workspace";
     const definitions = buildRecommendedAutomationDefinitions(projectPath, repoPath);
 
     definitions.forEach((automation, index) => {
