@@ -3,6 +3,7 @@ import * as z from "zod/v4";
 import { ClientClass, resolveClientClassFromServer } from "./clientPolicy.js";
 
 export const scopeTypeSchema = z.enum(["global", "project", "session"]);
+export const searchScopeModeSchema = z.enum(["auto", "all"]);
 
 export const scopeRefSchema = z.object({
   type: scopeTypeSchema,

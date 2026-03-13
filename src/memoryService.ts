@@ -20,6 +20,7 @@ import {
   cosineSimilarity,
   lexicalFromBm25,
   recencyScore,
+  rerankGenericRetrievalCandidates,
 } from "./retrieval/ranker.js";
 import { redactSensitiveText } from "./redaction/redact.js";
 import {
@@ -34,7 +35,7 @@ import {
   UpsertInput,
   UpsertResult,
 } from "./types.js";
-import { hashProjectPath, normalizeScope, normalizeScopes, scopeWhereClause } from "./scope.js";
+import { hashProjectPath, normalizeScope, normalizeScopes, resolveSearchScopes, scopeWhereClause } from "./scope.js";
 
 interface MemoryRow {
   id: string;
@@ -421,19 +422,6 @@ function compareCanonicalWinnerPriority(a: MemoryItem, b: MemoryItem): number {
   }
 
   return a.id.localeCompare(b.id);
-}
-
-function isCapturedDialogueLike(item: MemoryItem): boolean {
-  const looksLikeDialogue = /^\s*(user|assistant):/i.test(item.content);
-  if (!looksLikeDialogue) {
-    return false;
-  }
-
-  if (item.metadata?.captured === true) {
-    return true;
-  }
-
-  return item.tags.some((tag) => tag.trim().toLowerCase() === "turn-log");
 }
 
 function preferenceQueryTerms(query: string): string[] {
@@ -1238,7 +1226,7 @@ export class MemoryService {
   }
 
   private async searchInternal(input: SearchInput): Promise<SearchInternalResult> {
-    const scopes = normalizeScopes(input.scopes);
+    const scopes = resolveSearchScopes(input);
     const limit = Math.max(1, Math.min(200, input.limit ?? 20));
     const minScore = Math.max(0, Math.min(1, input.min_score ?? 0));
 
@@ -1274,8 +1262,8 @@ export class MemoryService {
 
     const rows = this.fetchRowsByIds([...candidateIds], scopes);
 
-    const ranked = rows
-      .map((row) => {
+    const ranked = rerankGenericRetrievalCandidates(
+      rows.map((row) => {
         const lexicalScore = lexicalFromBm25(lexicalMap.get(row.id));
         const semanticScore = semanticResult.map.get(row.id);
         const score = combineScore({
@@ -1286,35 +1274,30 @@ export class MemoryService {
           scopeType: row.scope_type,
           embeddingsAvailable: semanticResult.embeddingsAvailable,
         });
+        const item = toMemoryItem(row, true);
 
         return {
-          row,
-          score,
+          id: row.id,
+          updatedAt: row.updated_at,
+          item,
+          value: row,
+          baseScore: score,
+          lexicalScore,
         };
-      })
-      .filter((entry) => entry.score >= minScore)
-      .sort((a, b) => {
-        if (b.score !== a.score) {
-          return b.score - a.score;
-        }
-
-        if (b.row.updated_at !== a.row.updated_at) {
-          return b.row.updated_at.localeCompare(a.row.updated_at);
-        }
-
-        return a.row.id.localeCompare(b.row.id);
-      });
+      }),
+      minScore,
+    );
 
     const selected = ranked.slice(0, limit);
     const items = selected.map((entry) =>
-      toMemoryItem(entry.row, input.include_metadata ?? false),
+      input.include_metadata ?? false ? entry.item : toMemoryItem(entry.value, false),
     );
 
     this.touchRows(items.map((item) => item.id));
 
     const scores: Record<string, number> = {};
     for (const entry of selected) {
-      scores[entry.row.id] = Number(entry.score.toFixed(6));
+      scores[entry.id] = Number(entry.score.toFixed(6));
     }
 
     return {

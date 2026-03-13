@@ -7,7 +7,9 @@ describe("repo guidance files", () => {
     const guidancePath = path.resolve(process.cwd(), "AGENTS.md");
     const guidance = fs.readFileSync(guidancePath, "utf8");
 
-    expect(guidance).toContain("Use `memory_search` as the default retrieval tool");
+    expect(guidance).toContain("Use `memory_get_context` as the default retrieval tool");
+    expect(guidance).toContain("Use `memory_search` for explicit lookup");
+    expect(guidance).toContain("de-prioritizes noisy global captured/import transcript memories");
     expect(guidance).toContain("Use `memory_search_compact` only when");
     expect(guidance).toContain("Do not treat `memory_search_compact` as the normal safe default");
   });

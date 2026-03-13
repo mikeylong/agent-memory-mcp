@@ -135,6 +135,105 @@ async function seedMarkerMemories(args: {
   }
 }
 
+async function seedScopedSearchMemories(fixture: ClientFixture): Promise<{
+  query: string;
+  projectPath: string;
+  otherProjectPath: string;
+  sessionId: string;
+  otherSessionId: string;
+}> {
+  const query = "scope-resolution marker";
+  const projectPath = "/tmp/project-current";
+  const otherProjectPath = "/tmp/project-other";
+  const sessionId = "session-current";
+  const otherSessionId = "session-other";
+
+  await fixture.client.callTool({
+    name: "memory_upsert",
+    arguments: {
+      scope: { type: "global" },
+      content: `${query} source=global`,
+    },
+  });
+
+  await fixture.client.callTool({
+    name: "memory_upsert",
+    arguments: {
+      scope: { type: "project", id: hashProjectPath(projectPath) },
+      content: `${query} source=project-current`,
+      metadata: { project_path: projectPath },
+    },
+  });
+
+  await fixture.client.callTool({
+    name: "memory_upsert",
+    arguments: {
+      scope: { type: "project", id: hashProjectPath(otherProjectPath) },
+      content: `${query} source=project-other`,
+      metadata: { project_path: otherProjectPath },
+    },
+  });
+
+  await fixture.client.callTool({
+    name: "memory_upsert",
+    arguments: {
+      scope: { type: "session", id: sessionId },
+      content: `${query} source=session-current`,
+    },
+  });
+
+  await fixture.client.callTool({
+    name: "memory_upsert",
+    arguments: {
+      scope: { type: "session", id: otherSessionId },
+      content: `${query} source=session-other`,
+    },
+  });
+
+  return {
+    query,
+    projectPath,
+    otherProjectPath,
+    sessionId,
+    otherSessionId,
+  };
+}
+
+async function seedGlobalNoiseMemories(
+  fixture: ClientFixture,
+): Promise<{ query: string; cleanContent: string }> {
+  const query = "q".repeat(27);
+  const cleanContent = `Fact:${"a".repeat(22)}`;
+
+  await fixture.client.callTool({
+    name: "memory_upsert",
+    arguments: {
+      scope: { type: "global" },
+      content: cleanContent,
+    },
+  });
+
+  for (let i = 0; i < 12; i += 1) {
+    const suffix = String(i).padStart(2, "0");
+    await fixture.client.callTool({
+      name: "memory_upsert",
+      arguments: {
+        scope: { type: "global" },
+        content: `Assistant:${suffix}${"b".repeat(15)}`,
+        tags: ["import", "chatgpt-export", "transcript"],
+        metadata: {
+          captured: true,
+        },
+      },
+    });
+  }
+
+  return {
+    query,
+    cleanContent,
+  };
+}
+
 async function startMockOllama(): Promise<{ url: string; close: () => Promise<void> }> {
   const server = http.createServer((req, res) => {
     if (req.method === "GET" && req.url === "/api/tags") {
@@ -220,10 +319,17 @@ describe("agent-memory-mcp integration", () => {
         "memory_health",
       ]),
     );
-    expect(searchTool?.description).toContain("Default memory search for normal workflows");
+    expect(searchTool?.description).toContain("Explicit memory search for normal workflows");
     expect(searchTool?.description).toContain("Claude Code and Codex");
-    expect(compactTool?.description).toContain("Fallback compact memory search");
+    expect(searchTool?.description).toContain("current context");
+    expect(compactTool?.description).toContain("Fallback compact explicit memory search");
     expect(compactTool?.description).toContain("not the default choice for Claude Code");
+    expect((searchTool?.inputSchema as any)?.properties?.project_path).toBeTruthy();
+    expect((searchTool?.inputSchema as any)?.properties?.session_id).toBeTruthy();
+    expect((searchTool?.inputSchema as any)?.properties?.scope_mode).toBeTruthy();
+    expect((compactTool?.inputSchema as any)?.properties?.project_path).toBeTruthy();
+    expect((compactTool?.inputSchema as any)?.properties?.session_id).toBeTruthy();
+    expect((compactTool?.inputSchema as any)?.properties?.scope_mode).toBeTruthy();
 
     const invalid = await fixture.client.request(
       {
@@ -355,6 +461,126 @@ describe("agent-memory-mcp integration", () => {
     const payload = parseToolPayload(searchResult as any);
     expect(payload.items.length).toBeGreaterThan(0);
     expect(toolText(searchResult as any)).toBe(expectedSearchSummary(payload));
+  });
+
+  it("defaults unscoped memory_search to global-only when no context is provided", async () => {
+    const fixture = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
+    });
+    cleanups.push(fixture.cleanup);
+
+    const seeded = await seedScopedSearchMemories(fixture);
+
+    const searchResult = await fixture.client.callTool({
+      name: "memory_search",
+      arguments: {
+        query: seeded.query,
+        limit: 10,
+      },
+    });
+
+    const payload = parseToolPayload(searchResult as any);
+    const contents = payload.items.map((item: any) => item.content);
+
+    expect(payload.total).toBe(1);
+    expect(contents).toContain(`${seeded.query} source=global`);
+    expect(contents).not.toContain(`${seeded.query} source=project-current`);
+    expect(contents).not.toContain(`${seeded.query} source=project-other`);
+    expect(contents).not.toContain(`${seeded.query} source=session-current`);
+    expect(contents).not.toContain(`${seeded.query} source=session-other`);
+  });
+
+  it("uses project_path to narrow memory_search to current project without cross-project bleed", async () => {
+    const fixture = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
+    });
+    cleanups.push(fixture.cleanup);
+
+    const seeded = await seedScopedSearchMemories(fixture);
+
+    const searchResult = await fixture.client.callTool({
+      name: "memory_search",
+      arguments: {
+        query: seeded.query,
+        project_path: seeded.projectPath,
+        limit: 10,
+      },
+    });
+
+    const payload = parseToolPayload(searchResult as any);
+    const contents = payload.items.map((item: any) => item.content);
+
+    expect(payload.total).toBe(2);
+    expect(contents).toContain(`${seeded.query} source=global`);
+    expect(contents).toContain(`${seeded.query} source=project-current`);
+    expect(contents).not.toContain(`${seeded.query} source=project-other`);
+    expect(contents).not.toContain(`${seeded.query} source=session-current`);
+    expect(contents).not.toContain(`${seeded.query} source=session-other`);
+  });
+
+  it("uses project_path and session_id to restrict memory_search to the current context", async () => {
+    const fixture = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
+    });
+    cleanups.push(fixture.cleanup);
+
+    const seeded = await seedScopedSearchMemories(fixture);
+
+    const searchResult = await fixture.client.callTool({
+      name: "memory_search",
+      arguments: {
+        query: seeded.query,
+        project_path: seeded.projectPath,
+        session_id: seeded.sessionId,
+        limit: 10,
+      },
+    });
+
+    const payload = parseToolPayload(searchResult as any);
+    const contents = payload.items.map((item: any) => item.content);
+
+    expect(payload.total).toBe(3);
+    expect(contents).toContain(`${seeded.query} source=global`);
+    expect(contents).toContain(`${seeded.query} source=project-current`);
+    expect(contents).toContain(`${seeded.query} source=session-current`);
+    expect(contents).not.toContain(`${seeded.query} source=project-other`);
+    expect(contents).not.toContain(`${seeded.query} source=session-other`);
+  });
+
+  it("preserves the legacy broad search universe when scope_mode=all is requested", async () => {
+    const fixture = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
+    });
+    cleanups.push(fixture.cleanup);
+
+    const seeded = await seedScopedSearchMemories(fixture);
+
+    const searchResult = await fixture.client.callTool({
+      name: "memory_search",
+      arguments: {
+        query: seeded.query,
+        scope_mode: "all",
+        limit: 10,
+      },
+    });
+
+    const payload = parseToolPayload(searchResult as any);
+    const contents = payload.items.map((item: any) => item.content);
+
+    expect(payload.total).toBe(5);
+    expect(contents).toContain(`${seeded.query} source=global`);
+    expect(contents).toContain(`${seeded.query} source=project-current`);
+    expect(contents).toContain(`${seeded.query} source=project-other`);
+    expect(contents).toContain(`${seeded.query} source=session-current`);
+    expect(contents).toContain(`${seeded.query} source=session-other`);
   });
 
   it("supports bounded memory_search payloads for strict clients", async () => {
@@ -553,6 +779,101 @@ describe("agent-memory-mcp integration", () => {
     expect(payload.items.length).toBeGreaterThan(0);
     expect(payload.items[0].content.length).toBeLessThanOrEqual(900);
     expect(bytes).toBeLessThanOrEqual(180000);
+  });
+
+  it("applies the same current-context scope resolution to memory_search_compact", async () => {
+    const fixture = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_DISABLE_EMBEDDINGS: "1",
+      },
+    });
+    cleanups.push(fixture.cleanup);
+
+    const seeded = await seedScopedSearchMemories(fixture);
+
+    const compactResult = await fixture.client.callTool({
+      name: "memory_search_compact",
+      arguments: {
+        query: seeded.query,
+        project_path: seeded.projectPath,
+        session_id: seeded.sessionId,
+      },
+    });
+
+    const payload = parseToolPayload(compactResult as any);
+    const contents = payload.items.map((item: any) => item.content);
+
+    expect(payload.total).toBe(3);
+    expect(contents).toContain(`${seeded.query} source=global`);
+    expect(contents).toContain(`${seeded.query} source=project-current`);
+    expect(contents).toContain(`${seeded.query} source=session-current`);
+    expect(contents).not.toContain(`${seeded.query} source=project-other`);
+    expect(contents).not.toContain(`${seeded.query} source=session-other`);
+  });
+
+  it("de-prioritizes noisy global transcript imports in memory_search", async () => {
+    const mock = await startMockOllama();
+    const fixture = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_OLLAMA_URL: mock.url,
+      },
+    });
+    cleanups.push(async () => {
+      await fixture.cleanup();
+      await mock.close();
+    });
+
+    const seeded = await seedGlobalNoiseMemories(fixture);
+
+    const searchResult = await fixture.client.callTool({
+      name: "memory_search",
+      arguments: {
+        query: seeded.query,
+        limit: 5,
+      },
+    });
+
+    const payload = parseToolPayload(searchResult as any);
+    expect(payload.items.length).toBeGreaterThan(0);
+    expect(payload.items[0].content).toBe(seeded.cleanContent);
+  });
+
+  it("applies the same noisy-global ranking to generic get_context and compact search", async () => {
+    const mock = await startMockOllama();
+    const fixture = await createClientFixture({
+      envOverrides: {
+        AGENT_MEMORY_OLLAMA_URL: mock.url,
+      },
+    });
+    cleanups.push(async () => {
+      await fixture.cleanup();
+      await mock.close();
+    });
+
+    const seeded = await seedGlobalNoiseMemories(fixture);
+
+    const contextResult = await fixture.client.callTool({
+      name: "memory_get_context",
+      arguments: {
+        query: seeded.query,
+        max_items: 5,
+      },
+    });
+    const compactResult = await fixture.client.callTool({
+      name: "memory_search_compact",
+      arguments: {
+        query: seeded.query,
+        limit: 5,
+      },
+    });
+
+    const contextPayload = parseToolPayload(contextResult as any);
+    const compactPayload = parseToolPayload(compactResult as any);
+
+    expect(contextPayload.items.length).toBeGreaterThan(0);
+    expect(contextPayload.items[0].content).toBe(seeded.cleanContent);
+    expect(compactPayload.items.length).toBeGreaterThan(0);
+    expect(compactPayload.items[0].content).toBe(seeded.cleanContent);
   });
 
   it("reports embeddings available and degraded states", async () => {

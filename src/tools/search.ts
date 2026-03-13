@@ -11,6 +11,7 @@ import {
 import {
   optionalIntSchema,
   optionalNumberSchema,
+  searchScopeModeSchema,
   scopeSelectorSchema,
   toolJsonResult,
 } from "./common.js";
@@ -21,10 +22,13 @@ export function registerSearchTool(server: McpServer, memory: MemoryService): vo
     {
       title: "Search Memory",
       description:
-        "Default memory search for normal workflows and rich clients such as Claude Code and Codex; uses lexical and semantic ranking with client-adaptive sizing.",
+        "Explicit memory search for normal workflows and rich clients such as Claude Code and Codex; uses lexical and semantic ranking with client-adaptive sizing. Unscoped calls default to current context unless scope_mode='all' or explicit scopes are provided.",
       inputSchema: {
         query: z.string().default(""),
         scopes: z.array(scopeSelectorSchema).optional(),
+        project_path: z.string().optional(),
+        session_id: z.string().optional(),
+        scope_mode: searchScopeModeSchema.optional(),
         limit: optionalIntSchema(1, 200),
         min_score: optionalNumberSchema(0, 1),
         include_metadata: z.boolean().optional(),
@@ -37,6 +41,9 @@ export function registerSearchTool(server: McpServer, memory: MemoryService): vo
       const rawSearchInput: SearchInput = {
         query: input.query,
         scopes: input.scopes,
+        project_path: input.project_path,
+        session_id: input.session_id,
+        scope_mode: input.scope_mode,
         limit: input.limit,
         min_score: input.min_score,
         include_metadata: input.include_metadata,
