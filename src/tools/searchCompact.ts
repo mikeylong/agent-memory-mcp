@@ -4,6 +4,7 @@ import { MemoryService } from "../memoryService.js";
 import {
   optionalIntSchema,
   optionalNumberSchema,
+  searchScopeModeSchema,
   scopeSelectorSchema,
   toolJsonResult,
 } from "./common.js";
@@ -14,10 +15,13 @@ export function registerSearchCompactTool(server: McpServer, memory: MemoryServi
     {
       title: "Search Memory (Compact)",
       description:
-        "Fallback compact memory search for strict payload-limit environments; not the default choice for Claude Code or other rich clients.",
+        "Fallback compact explicit memory search for strict payload-limit environments; unscoped calls default to current context, and it is not the default choice for Claude Code or other rich clients.",
       inputSchema: {
         query: z.string().default(""),
         scopes: z.array(scopeSelectorSchema).optional(),
+        project_path: z.string().optional(),
+        session_id: z.string().optional(),
+        scope_mode: searchScopeModeSchema.optional(),
         limit: optionalIntSchema(1, 50),
         min_score: optionalNumberSchema(0, 1),
       },
@@ -26,6 +30,9 @@ export function registerSearchCompactTool(server: McpServer, memory: MemoryServi
       const result = await memory.search({
         query: input.query,
         scopes: input.scopes,
+        project_path: input.project_path,
+        session_id: input.session_id,
+        scope_mode: input.scope_mode,
         limit: input.limit ?? 12,
         min_score: input.min_score,
         include_metadata: false,

@@ -5,7 +5,7 @@
 Default data path: `$HOME/.agent-memory/memory.db`.
 Use the same `AGENT_MEMORY_HOME` across clients so Codex/Claude share one memory store.
 
-`memory_search` is the default retrieval tool and is client-adaptive by default. Users should not need to prompt for `memory_search_compact` in normal Claude Code or Codex workflows.
+`memory_get_context` is the default retrieval tool for turn-level context. `memory_search` remains the default explicit lookup tool and is client-adaptive by default. Users should not need to prompt for `memory_search_compact` in normal Claude Code or Codex workflows. Generic retrieval de-prioritizes noisy global captured/import transcript memories and only backfills them when cleaner matches are insufficient.
 
 ## At a Glance
 
@@ -137,11 +137,11 @@ The bootstrap output is the onboarding source of truth for automation name, sche
 
 ## Client Behavior
 
-Use `memory_search` as the default retrieval path. The server shapes payload size by client type:
+Use `memory_get_context` as the default retrieval path for normal turn preparation. Use `memory_search` for explicit lookup. When `memory_search` is called without explicit `scopes`, it searches the current context by default: `global`, plus `project_path` and `session_id` when provided. Generic retrieval de-prioritizes noisy global captured/import transcript memories and only backfills them when cleaner matches are insufficient. Set `scope_mode="all"` to opt into the legacy broad search universe. The server shapes payload size by client type:
 
 | Client | `memory_search` behavior |
 |---|---|
-| Claude Code / Codex | Preferred default; rich defaults with no forced compact caps |
+| Claude Code / Codex | Preferred explicit lookup path; rich defaults with no forced compact caps |
 | Unknown clients | Adaptive retry: rich first, compact-safe fallback when envelope is too large |
 
 `memory_search_compact` remains available as a fallback endpoint for strict payload-limit environments, explicit compact-mode requests, or manual troubleshooting. It should not be the default choice for Claude Code or Codex.
@@ -250,7 +250,7 @@ The repo also includes four automation-oriented CLIs that those recurring jobs c
 ## Cross-Agent Verification
 
 1. In one client, write a fact with `memory_upsert`.
-2. In another client, retrieve it with `memory_search`.
+2. In another client, retrieve it with `memory_get_context` or `memory_search` scoped to the same project/session.
 3. Confirm both clients return the same fact from shared local storage.
 
 ## Canonical Preferences

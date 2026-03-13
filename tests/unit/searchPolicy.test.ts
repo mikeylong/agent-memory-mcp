@@ -31,6 +31,9 @@ describe("search policy input shaping", () => {
       {
         query: "preferences",
         limit: 3,
+        project_path: "/tmp/project-a",
+        session_id: "session-1",
+        scope_mode: "auto",
         max_content_chars: 350,
         max_response_bytes: 8000,
         include_metadata: true,
@@ -42,11 +45,17 @@ describe("search policy input shaping", () => {
     expect(shaped.max_content_chars).toBe(350);
     expect(shaped.max_response_bytes).toBe(8000);
     expect(shaped.include_metadata).toBe(false);
+    expect(shaped.project_path).toBe("/tmp/project-a");
+    expect(shaped.session_id).toBe("session-1");
+    expect(shaped.scope_mode).toBe("auto");
   });
 
   it("keeps rich clients unchanged and deterministic", () => {
     const input = {
       query: "roadmap",
+      project_path: "/tmp/project-rich",
+      session_id: "session-rich",
+      scope_mode: "all" as const,
       limit: 25,
       include_metadata: true,
       max_content_chars: 2000,

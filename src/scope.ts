@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { ScopeRef, ScopeSelector } from "./types.js";
+import { ScopeRef, ScopeSelector, SearchInput } from "./types.js";
 
 export function hashProjectPath(projectPath: string): string {
   const normalized = path.resolve(projectPath);
@@ -93,6 +93,38 @@ export function normalizeScopes(scopes?: ScopeSelector[]): ScopeSelector[] {
           : scope.id.trim(),
     };
   });
+}
+
+export function resolveSearchScopes(
+  input: Pick<SearchInput, "scopes" | "project_path" | "session_id" | "scope_mode">,
+): ScopeSelector[] {
+  if (input.scopes !== undefined) {
+    return input.scopes.length === 0 ? [] : normalizeScopes(input.scopes);
+  }
+
+  if (input.scope_mode === "all") {
+    return normalizeScopes(undefined);
+  }
+
+  const scopes: ScopeSelector[] = [{ type: "global" }];
+  const projectPath = input.project_path?.trim();
+  const sessionId = input.session_id?.trim();
+
+  if (projectPath) {
+    scopes.push({
+      type: "project",
+      id: hashProjectPath(path.resolve(projectPath)),
+    });
+  }
+
+  if (sessionId) {
+    scopes.push({
+      type: "session",
+      id: sessionId,
+    });
+  }
+
+  return scopes;
 }
 
 export function scopeWhereClause(

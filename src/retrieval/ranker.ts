@@ -1,10 +1,57 @@
-import { ScopeType } from "../types.js";
+import { hasCanonicalTag, hasPreferenceIntentTag } from "../canonical.js";
+import type { MemoryItem, ScopeType } from "../types.js";
 
 const SCOPE_BOOST: Record<ScopeType, number> = {
   global: 0.03,
   project: 0.05,
   session: 0.08,
 };
+
+const NOISY_GLOBAL_TAGS = new Set(["captured", "transcript", "turn-log"]);
+const NOISY_IMPORT_TAGS = new Set(["chatgpt-export", "codex-session", "claude-session"]);
+const NOISY_GLOBAL_SEMANTIC_ONLY_PENALTY = 0.18;
+const NOISY_GLOBAL_LEXICAL_PENALTY = 0.08;
+
+export type GenericRetrievalNoiseClass = "clean" | "noisy_global_dialogue_like";
+
+export interface GenericRetrievalCandidate<T> {
+  id: string;
+  updatedAt: string;
+  item: MemoryItem;
+  baseScore: number;
+  lexicalScore: number;
+  value: T;
+}
+
+export interface RankedGenericRetrievalCandidate<T> extends GenericRetrievalCandidate<T> {
+  score: number;
+  noiseClass: GenericRetrievalNoiseClass;
+  backfillOnly: boolean;
+}
+
+function normalizedTagSet(tags: string[]): Set<string> {
+  return new Set(tags.map((tag) => tag.trim().toLowerCase()));
+}
+
+function hasCanonicalPreferenceMetadata(item: Pick<MemoryItem, "metadata">): boolean {
+  const normalizedKey = item.metadata?.normalized_key;
+  return typeof normalizedKey === "string" && normalizedKey.trim().length > 0;
+}
+
+function compareRankedGenericRetrievalCandidates<T>(
+  a: RankedGenericRetrievalCandidate<T>,
+  b: RankedGenericRetrievalCandidate<T>,
+): number {
+  if (b.score !== a.score) {
+    return b.score - a.score;
+  }
+
+  if (b.updatedAt !== a.updatedAt) {
+    return b.updatedAt.localeCompare(a.updatedAt);
+  }
+
+  return a.id.localeCompare(b.id);
+}
 
 export function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length === 0 || b.length === 0 || a.length !== b.length) {
@@ -61,6 +108,91 @@ export function recencyScore(updatedAt: string, now = new Date()): number {
 
 export function scopeBoost(scopeType: ScopeType): number {
   return SCOPE_BOOST[scopeType] ?? 0;
+}
+
+export function isCapturedDialogueLike(
+  item: Pick<MemoryItem, "content" | "tags" | "metadata">,
+): boolean {
+  const looksLikeDialogue = /^\s*(user|assistant):/i.test(item.content);
+  if (!looksLikeDialogue) {
+    return false;
+  }
+
+  if (item.metadata?.captured === true) {
+    return true;
+  }
+
+  return item.tags.some((tag) => tag.trim().toLowerCase() === "turn-log");
+}
+
+export function classifyGenericRetrievalNoise(item: MemoryItem): GenericRetrievalNoiseClass {
+  if (item.scope.type !== "global") {
+    return "clean";
+  }
+
+  if (
+    hasCanonicalTag(item.tags) ||
+    hasPreferenceIntentTag(item.tags) ||
+    hasCanonicalPreferenceMetadata(item)
+  ) {
+    return "clean";
+  }
+
+  const tags = normalizedTagSet(item.tags);
+  if (isCapturedDialogueLike(item) || item.metadata?.captured === true) {
+    return "noisy_global_dialogue_like";
+  }
+
+  for (const tag of NOISY_GLOBAL_TAGS) {
+    if (tags.has(tag)) {
+      return "noisy_global_dialogue_like";
+    }
+  }
+
+  if (tags.has("import")) {
+    for (const tag of NOISY_IMPORT_TAGS) {
+      if (tags.has(tag)) {
+        return "noisy_global_dialogue_like";
+      }
+    }
+  }
+
+  return "clean";
+}
+
+export function rerankGenericRetrievalCandidates<T>(
+  candidates: GenericRetrievalCandidate<T>[],
+  minScore: number,
+): RankedGenericRetrievalCandidate<T>[] {
+  const rescored = candidates
+    .map((candidate) => {
+      const noiseClass = classifyGenericRetrievalNoise(candidate.item);
+      const lexicalSupported = candidate.lexicalScore > 0;
+      const penalty =
+        noiseClass === "noisy_global_dialogue_like"
+          ? lexicalSupported
+            ? NOISY_GLOBAL_LEXICAL_PENALTY
+            : NOISY_GLOBAL_SEMANTIC_ONLY_PENALTY
+          : 0;
+      const score = Math.max(0, Math.min(1, candidate.baseScore - penalty));
+
+      return {
+        ...candidate,
+        score,
+        noiseClass,
+        backfillOnly: noiseClass === "noisy_global_dialogue_like" && !lexicalSupported,
+      };
+    })
+    .filter((candidate) => candidate.score >= minScore);
+
+  const primary = rescored
+    .filter((candidate) => !candidate.backfillOnly)
+    .sort(compareRankedGenericRetrievalCandidates);
+  const backfill = rescored
+    .filter((candidate) => candidate.backfillOnly)
+    .sort(compareRankedGenericRetrievalCandidates);
+
+  return [...primary, ...backfill];
 }
 
 export function combineScore(args: {

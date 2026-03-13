@@ -44,9 +44,14 @@ export interface UpsertResult {
   replaced_ids?: string[];
 }
 
+export type SearchScopeMode = "auto" | "all";
+
 export interface SearchInput {
   query: string;
   scopes?: ScopeSelector[];
+  project_path?: string;
+  session_id?: string;
+  scope_mode?: SearchScopeMode;
   limit?: number;
   min_score?: number;
   include_metadata?: boolean;
