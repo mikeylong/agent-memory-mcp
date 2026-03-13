@@ -1,37 +1,88 @@
 # agent-memory-mcp
 
-`agent-memory-mcp` is a local MCP server that gives agents shared, durable memory stored in SQLite.
+`agent-memory-mcp` is a local MCP server that gives agents shared, durable memory backed by SQLite.
 
-Default data path: `$HOME/.agent-memory/memory.db`.
-Use the same `AGENT_MEMORY_HOME` across clients so Codex/Claude share one memory store.
+Use it when you want Codex, Claude Code, Xcode Coding Assistant, or other MCP clients to stop starting from zero on every turn. Instead of each client keeping its own hidden history, they all read and write to the same local memory layer.
 
-`memory_get_context` is the default retrieval tool for turn-level context. `memory_search` remains the default explicit lookup tool and is client-adaptive by default. Users should not need to prompt for `memory_search_compact` in normal Claude Code or Codex workflows. Generic retrieval de-prioritizes noisy global captured/import transcript memories and only backfills them when cleaner matches are insufficient.
+Default data path: `$HOME/.agent-memory/memory.db`
 
-## At a Glance
-
-`agent-memory-mcp` sits between your agents and a shared local memory store. It lets each client read relevant context before a turn and write durable facts after a turn, so Codex, Claude Code, and importers all contribute to the same memory layer.
+If you want multiple clients to share the same memory, point them at the same `AGENT_MEMORY_HOME`.
 
 ![Simple overview of agent-memory-mcp](docs/agent-memory-overview.svg)
 
-Optional embeddings can improve retrieval ranking.
+## Why This Exists
 
-## Distribution
+Most agent workflows have the same failure mode:
 
-This project is currently distributed via source/GitHub only.
-NPM registry publishing is intentionally out of scope for this release.
+- a new chat or new client loses important project context
+- stable preferences and repo conventions have to be repeated
+- imported sessions stay trapped inside one tool's transcript format
+- one agent cannot easily benefit from what another agent already learned
 
-## Release Model
+`agent-memory-mcp` fixes that by adding a local memory layer with:
 
-A release for this project means:
-- a versioned Git commit and annotated git tag
-- a GitHub release with notes
-- a validated source checkout where `npm install`, `npm run build`, and the documented runtime commands work as written
+- shared storage across clients
+- scope-aware retrieval for `global`, `project`, and `session` memory
+- durable fact storage with dedupe, redaction, and optional TTL
+- importers for Codex, Claude, and ChatGPT history
+- optional embeddings for better ranking, with lexical-only fallback when embeddings are unavailable
 
-It does **not** mean npm registry publishing for the current release path.
+## Who Should Use It
 
-## Quick Start (Shortcuts)
+You should use this repo if:
 
-### 1) Install
+- you work in the same repo across multiple agents or chat sessions
+- you want agents to remember stable project facts, decisions, and preferences
+- you want a local memory system you control instead of a hosted service
+- you want imported session history to become searchable memory, not dead logs
+
+You probably do not need it if:
+
+- you only use one short-lived chat and do not care about durable context
+- you want team-wide cloud sync across machines; this project is local-first
+
+## What The Agent Actually Does With It
+
+This server is most useful when the client uses it on every turn.
+
+Recommended turn loop:
+
+1. Before responding, call `memory_get_context` with the latest user message plus `project_path` and optionally `session_id`.
+2. Use the returned context bundle while reasoning.
+3. After responding, call `memory_capture` to extract facts from the turn.
+4. For durable rules or preferences, also call `memory_upsert`.
+
+That turns memory from "maybe useful storage" into a real operating layer for the agent.
+
+## Core Tools
+
+| Tool | Use it for |
+| --- | --- |
+| `memory_get_context` | Default turn-prep retrieval. Returns a scope-aware, token-budgeted context bundle. |
+| `memory_search` | Explicit lookup when the agent needs to search memory on purpose. |
+| `memory_search_compact` | Fallback for payload-constrained environments. Not the normal default for Codex or Claude Code. |
+| `memory_capture` | Extract salient facts from raw conversation text and store them as memories. |
+| `memory_upsert` | Save or update durable facts, preferences, or conventions directly. |
+| `memory_delete` | Soft-delete a specific memory entry. |
+| `memory_forget_scope` | Bulk soft-delete memories in a scope. |
+| `memory_health` | Check DB state, embeddings health, and retrieval mode. |
+
+## How Memory Is Scoped
+
+- `global`: user-wide facts that should apply everywhere
+- `project`: repository-specific facts, conventions, and decisions
+- `session`: temporary context for one thread or run
+
+This matters because the same fact can be appropriate at one scope and wrong at another. For example, a coding-style preference may be global, while a release convention belongs at project scope.
+
+## Quick Start
+
+### Requirements
+
+- Node.js `>=22`
+- optional: [Ollama](https://ollama.com/) if you want semantic embeddings
+
+### 1. Install
 
 ```bash
 git clone https://github.com/mikeylong/agent-memory-mcp.git
@@ -40,22 +91,17 @@ npm install
 npm run build
 ```
 
-### 2) Configure Codex + Xcode
+This project is currently distributed from source/GitHub. npm publishing is intentionally out of scope.
 
-Run the repo-local installer:
+### 2. Configure clients
+
+For Codex and Xcode Coding Assistant, use the installer:
 
 ```bash
 scripts/install-clients.sh
 ```
 
-What it does:
-- updates `~/.codex/config.toml` automatically
-- updates `~/Library/Developer/Xcode/CodingAssistant/codex/config.toml` when that verified Xcode config directory already exists
-- skips Xcode config and prints exact manual instructions when Xcode has not created its Codex config directory yet
-- creates timestamped backups before editing existing config files
-- writes config changes atomically so failed updates do not leave partial files behind
-
-Useful installer flags:
+Useful flags:
 
 ```bash
 scripts/install-clients.sh --dry-run
@@ -65,15 +111,23 @@ scripts/install-clients.sh --agent-memory-home "$HOME/.agent-memory"
 scripts/install-clients.sh --force
 ```
 
-Optional npm wrapper:
+What the installer does:
+
+- updates `~/.codex/config.toml`
+- updates `~/Library/Developer/Xcode/CodingAssistant/codex/config.toml` when that directory already exists
+- creates backups before editing existing config files
+- writes changes atomically
+
+For Claude Code, enable the hook-based integration:
 
 ```bash
-npm run install:clients
+npm run enable:claude-wrapper
+source ~/.zshrc
 ```
 
-Claude Code permissions tip:
+After that, normal `claude` usage keeps the native interactive UX while memory read/write runs through Claude hooks on every turn.
 
-If Claude Code keeps prompting for `agent-memory` tool permissions, allow the whole MCP server once in your Claude settings:
+Claude Code permissions tip:
 
 ```json
 {
@@ -83,11 +137,11 @@ If Claude Code keeps prompting for `agent-memory` tool permissions, allow the wh
 }
 ```
 
-This approves all tools from this server (including `memory_get_context` and `memory_capture`), which avoids repeated per-tool prompts.
+### 3. Sanity check
 
-### 3) Sanity check
+Restart any clients that were already open, then call `memory_health`.
 
-Restart Codex and Xcode if they were already open, then call `memory_health` from your MCP client. Expected shape:
+Healthy first-run shape:
 
 ```json
 {
@@ -98,192 +152,145 @@ Restart Codex and Xcode if they were already open, then call `memory_health` fro
   "retrieval_mode": "semantic+lexical",
   "embeddings_provider": "ollama",
   "embeddings_reason": "healthy",
-  "actions": [],
-  "stats": {
-    "memories": {
-      "total": 0,
-      "active": 0,
-      "soft_deleted": 0,
-      "expired_active": 0
-    },
-    "scopes": {
-      "global": 0,
-      "project": 0,
-      "session": 0
-    },
-    "embeddings": {
-      "rows": 0,
-      "bytes": 0,
-      "avg_bytes": 0
-    },
-    "storage": {
-      "db_size_bytes": 0,
-      "idempotency_keys": 0,
-      "max_content_bytes": 0
-    }
-  }
+  "actions": []
 }
 ```
 
-### 4) Recommended automations
+If Ollama is not running, the server still works in lexical-only mode.
 
-Use the bootstrap command to print the four recommended Codex automations for a workspace, including whether each one already exists under `~/.codex/automations`:
+## First Practical Workflow
 
-```bash
-npm run -s automation:bootstrap -- --project-path "$HOME/projects/agent-memory"
-```
+Once the server is installed, the high-value workflow is:
 
-The bootstrap output is the onboarding source of truth for automation name, schedule, prompt, repo cwd, and present-or-missing status. If you omit `--project-path`, it defaults to the current working directory.
+1. Point every client at the same `AGENT_MEMORY_HOME`.
+2. Make sure the client actually calls `memory_get_context` before answering.
+3. Make sure it calls `memory_capture` after answering.
+4. Use `memory_upsert` for stable facts that must survive noise and transcript churn.
+5. Import past sessions so old work becomes searchable memory.
 
-## Client Behavior
+If you skip step 2 and step 3, you have storage but not a memory loop.
 
-Use `memory_get_context` as the default retrieval path for normal turn preparation. Use `memory_search` for explicit lookup. When `memory_search` is called without explicit `scopes`, it searches the current context by default: `global`, plus `project_path` and `session_id` when provided. Generic retrieval de-prioritizes noisy global captured/import transcript memories and only backfills them when cleaner matches are insufficient. Set `scope_mode="all"` to opt into the legacy broad search universe. The server shapes payload size by client type:
+## Start Commands And Shortcuts
 
-| Client | `memory_search` behavior |
-|---|---|
-| Claude Code / Codex | Preferred explicit lookup path; rich defaults with no forced compact caps |
-| Unknown clients | Adaptive retry: rich first, compact-safe fallback when envelope is too large |
+| Task | Command |
+| --- | --- |
+| Start the MCP server directly | `node dist/index.js` |
+| Start Codex with enforced memory wrapper | `scripts/codex-memory.sh "$HOME/projects/agent-memory"` |
+| Enable Claude hook integration | `npm run enable:claude-wrapper && source ~/.zshrc` |
+| Legacy Claude wrapper path | `scripts/claude-memory.sh "$HOME/projects/agent-memory"` |
+| Show recommended Codex automations | `npm run -s automation:bootstrap -- --project-path "$HOME/projects/agent-memory"` |
 
-`memory_search_compact` remains available as a fallback endpoint for strict payload-limit environments, explicit compact-mode requests, or manual troubleshooting. It should not be the default choice for Claude Code or Codex.
+`session_id` is optional for wrapper flows. If omitted, one is auto-generated.
 
-### 5) Start Codex wrapper shortcut
+## Import Existing History
 
-```bash
-scripts/codex-memory.sh "$HOME/projects/agent-memory"
-```
+You do not need to start with an empty memory store.
 
-`session_id` is optional. If omitted, one is auto-generated.
-
-### 5b) Enable Claude interactive hooks (recommended Claude path)
-
-```bash
-npm run enable:claude-wrapper
-source ~/.zshrc
-```
-
-After this, plain `claude` stays in native interactive UX, and memory enforcement runs via
-Claude hooks on every turn (`UserPromptSubmit` + `Stop`).
-
-Behavior notes:
-- fail-open: Claude turn still proceeds if hook memory read/write fails
-- slash commands (for example `/mcp`, `/model`) are not captured as memories
-- previous shell wrapper interception (`claude()` -> `claude -p`) is removed
-- if you need the old print-wrapper behavior for troubleshooting, use `scripts/claude-memory.sh "$HOME/projects/agent-memory"` from the Advanced section below
-
-### 6) Import latest sessions (auto-discovery)
+Import the latest local sessions:
 
 ```bash
 scripts/import-codex-session.sh --project-path "$HOME/projects/agent-memory"
 scripts/import-claude-session.sh --project-path "$HOME/projects/agent-memory"
 ```
 
-### 7) First-run embeddings behavior
+Import specific files:
 
-- `agent-memory-mcp` does **not** auto-install Ollama.
-- If Ollama is unavailable, the server still works in lexical-only mode and `memory_health` reports degraded embeddings with actionable `actions`.
-- To enable semantic embeddings:
-  - Start Ollama and ensure `AGENT_MEMORY_OLLAMA_URL` points to a reachable endpoint (default `http://127.0.0.1:11434`).
-  - Ensure `AGENT_MEMORY_EMBED_MODEL` is available in Ollama (default `nomic-embed-text`).
-- To run intentionally without embeddings, set `AGENT_MEMORY_DISABLE_EMBEDDINGS=1`.
+```bash
+scripts/import-codex-session.sh \
+  --session-file "$HOME/.codex/sessions/YYYY/MM/DD/rollout-<id>.jsonl" \
+  --project-path "$HOME/projects/agent-memory"
 
-## Common Tasks (Shortcuts)
+scripts/import-claude-session.sh \
+  --session-file "$HOME/.claude/projects/<workspace-slug>/<session-id>.jsonl" \
+  --project-path "$HOME/projects/agent-memory"
+```
 
-| Task | Command |
-|---|---|
-| Install Codex + Xcode client config | `scripts/install-clients.sh` |
-| Dry-run installer | `scripts/install-clients.sh --dry-run` |
-| Start Codex with enforced memory | `scripts/codex-memory.sh "$HOME/projects/agent-memory"` |
-| Enable Claude hooks (recommended) | `npm run enable:claude-wrapper && source ~/.zshrc` |
-| Start Claude chat with enforced memory (interactive mode) | `claude` |
-| Import latest Codex session | `scripts/import-codex-session.sh --project-path "$HOME/projects/agent-memory"` |
-| Import latest Claude session | `scripts/import-claude-session.sh --project-path "$HOME/projects/agent-memory"` |
-| Show recommended Codex automations | `npm run -s automation:bootstrap -- --project-path "$HOME/projects/agent-memory"` |
-| Run daily health drift report | `npm run -s automation:health-drift` |
-| Sync latest Codex + Claude sessions | `npm run -s automation:import-sync -- --project-path "$HOME/projects/agent-memory"` |
-| Run retrieval QA smoke test | `npm run -s automation:retrieval-qa` |
-| Preview selective cleanup candidates | `npm run -s automation:cleanup -- --dry-run` |
-| Apply selective cleanup policy | `npm run -s automation:cleanup -- --apply` |
-| Import a specific Codex session file | `scripts/import-codex-session.sh --session-file "$HOME/.codex/sessions/YYYY/MM/DD/rollout-<id>.jsonl" --project-path "$HOME/projects/agent-memory"` |
-| Import a specific Claude session file | `scripts/import-claude-session.sh --session-file "$HOME/.claude/projects/<workspace-slug>/<session-id>.jsonl" --project-path "$HOME/projects/agent-memory"` |
-| Import into session scope | `scripts/import-codex-session.sh --scope session --session-id replay-01` |
+Import a ChatGPT export:
 
-Importer shortcut flags (both scripts):
+```bash
+node dist/importChatgptExport.js \
+  --export-zip "$HOME/Downloads/ChatGPT Data Download.zip" \
+  --capture-scope global \
+  --branch-strategy active \
+  --coverage all \
+  --max-facts 5
+```
+
+Importer flags for Codex and Claude session scripts:
+
 - `--session-file <path>` optional override
 - `--project-path <path>` default `pwd`
 - `--scope <project|global|session>` default `project`
 - `--session-id <id>` only when `--scope session`
 - `--max-facts <n>` default `25`
-- `-h|--help`
 
-## Automation Jobs
+## Retrieval Behavior
 
-Start with the bootstrap command when you want the recommended Codex automation set for a workspace:
+`memory_get_context` is the default retrieval path for normal turn preparation.
 
-- `npm run -s automation:bootstrap -- --project-path <path>`
-  - prints deterministic JSON that includes the four canonical automation definitions
-  - marks each one `present` or `missing` by checking `~/.codex/automations`
-  - is the onboarding entry point for creating any missing automations
+`memory_search` is the default explicit lookup tool. When called without explicit `scopes`, it searches the current context by default:
 
-The repo also includes four automation-oriented CLIs that those recurring jobs call:
+- `global`
+- `project_path`, when provided
+- `session_id`, when provided
+
+Generic retrieval de-prioritizes noisy captured/import transcript memories and backfills them only when cleaner matches are insufficient.
+
+Client behavior:
+
+| Client | `memory_search` behavior |
+| --- | --- |
+| Codex / Claude Code | Preferred explicit lookup path with rich defaults |
+| Unknown clients | Adaptive retry with compact-safe fallback if needed |
+
+`memory_search_compact` remains available for constrained environments or explicit compact-mode use. It is not the normal default for Codex or Claude Code.
+
+## Optional Embeddings
+
+Embeddings improve ranking but are optional.
+
+- default provider: Ollama
+- default model: `nomic-embed-text`
+- default Ollama URL: `http://127.0.0.1:11434`
+
+If Ollama is unavailable:
+
+- the server still works
+- retrieval falls back to lexical-only mode
+- `memory_health` reports a degraded embeddings state with suggested actions
+
+If you want to disable embeddings on purpose:
+
+```bash
+AGENT_MEMORY_DISABLE_EMBEDDINGS=1 node dist/index.js
+```
+
+## Recommended Automations
+
+Use the bootstrap command to print the recommended Codex automation set for a workspace:
+
+```bash
+npm run -s automation:bootstrap -- --project-path "$HOME/projects/agent-memory"
+```
+
+The bootstrap output is the onboarding source of truth for:
+
+- automation name
+- schedule
+- prompt
+- workspace cwd
+- whether each automation already exists under `~/.codex/automations`
+
+Included automation-oriented CLIs:
 
 - `npm run -s automation:health-drift`
-  - records `memory_health` snapshots under `$AGENT_MEMORY_HOME/automation-state/health-drift-history.json`
-  - reports day/week deltas and threshold breaches for DB growth, active-memory growth, expired-active streaks, idempotency growth, and large content outliers
 - `npm run -s automation:import-sync -- --project-path <path>`
-  - imports the latest Codex and Claude sessions into the given project scope
-  - records import state under `$AGENT_MEMORY_HOME/automation-state/import-sync-state.json`
-  - skips reruns when the latest session file has not changed
 - `npm run -s automation:retrieval-qa`
-  - writes a temporary canonical-preference smoke fixture
-  - verifies `memory_search` and `memory_get_context` return the latest canonical answer
-  - deletes the temporary session scope before exiting
 - `npm run -s automation:cleanup -- --dry-run|--apply [--before <iso>]`
-  - applies the fixed moderate cleanup policy
-  - eligible rows:
-    - expired memories older than 7 days
-    - captured rows older than 45 days
-  - excluded rows:
-    - any memory with `canonical_key`
-    - any memory tagged `canonical` or `user-preference`
-  - `--dry-run` is the default; use `--apply` to perform the cleanup
 
-## Cross-Agent Verification
+## Manual MCP Configuration
 
-1. In one client, write a fact with `memory_upsert`.
-2. In another client, retrieve it with `memory_get_context` or `memory_search` scoped to the same project/session.
-3. Confirm both clients return the same fact from shared local storage.
-
-## Canonical Preferences
-
-- `memory_upsert` idempotency key behavior:
-  - same key + same effective payload (same scope + redacted content hash) returns the existing row (`created: false`)
-  - same key + changed payload is treated as latest-write-wins; the idempotency key is remapped to the latest row
-- Canonical preference memories now enforce **last-write-wins** per `(scope_type, scope_id, canonical_key)`.
-- Canonical key resolution order on write:
-  - `metadata.normalized_key` (if provided)
-  - idempotency-key fallback when tags are preference-intent and key normalizes to `favorite_*`
-  - inferred from content when tags are preference-intent and content matches:
-    - `Favorite <subject>: <value>`
-    - `Canonical user preference: favorite <subject> is <value>`
-- When a canonical key is resolved, the upsert response may include:
-  - `canonical_key`
-  - `replaced_ids` (soft-deleted prior active canonical entries for that key/scope)
-- For preference-intent `memory_get_context` queries (for example, “what is my favorite notebook cover color?”):
-  - active canonical memories are prioritized first
-  - duplicate canonical keys use scope tie-break `session > project > global`, then recency
-  - captured dialogue-like rows (`User:`/`Assistant:` with `metadata.captured=true`) are excluded from the remainder when canonical winners are found
-- `memory_get_context` supports temporal preference prompts (for example, “what used to be my favorite zebra color?”) and may return `canonical_timeline` with active and prior values.
-- Runtime freshness for manual tests:
-  - Claude hooks and MCP runtime execute `dist/*`, not `src/*`
-  - after source changes, run `npm run build` and restart affected clients/hooks before validating behavior
-  - stale `dist` can produce false negatives (for example, old idempotency/canonical logic still active)
-
-## Advanced
-
-### Manual MCP configuration fallback
-
-If you do not want the installer to edit client config files, add this MCP server entry yourself.
-Use the current `node` executable on your machine if GUI apps need an absolute path.
+If you do not want the installer to edit config files, add the MCP server entry manually.
 
 ```toml
 [mcp_servers.agent-memory]
@@ -295,105 +302,46 @@ enabled = true
 AGENT_MEMORY_HOME = "/absolute/path/to/.agent-memory"
 ```
 
-Codex target path:
+Codex config path:
+
 - `~/.codex/config.toml`
 
-Xcode target path:
+Xcode config path:
+
 - `~/Library/Developer/Xcode/CodingAssistant/codex/config.toml`
 
-Xcode notes:
-- the installer patches the Xcode config only when that directory already exists, unless you pass `--force`
-- if Xcode has not created its Coding Assistant config yet, open Xcode and launch the Coding Assistant/Codex flow once, then rerun the installer
-- if your Xcode build exposes MCP settings only through UI on this machine, use the same server payload there
+GUI-launched apps often need an absolute Node path instead of plain `node`.
 
-### Installer Troubleshooting
+## Advanced Commands
 
-- If Xcode has never configured Codex, `~/Library/Developer/Xcode/CodingAssistant/codex` may not exist yet. In that case the installer skips Xcode by default, prints the exact MCP block, and tells you to open Xcode Coding Assistant/Codex once before rerunning.
-- If a config file is read-only or not writable, the installer exits with a path-specific permission error instead of modifying it partially.
-- If the installer detects multiple `agent-memory` sections or another unsupported existing shape, it does not rewrite the file. It prints the manual MCP block so you can reconcile the file yourself.
-- If a write fails after rendering the next config, the installer keeps the original file in place and reports which step failed.
-- Codex keeps `command = "node"` for compatibility with the current config style. Xcode uses an absolute Node path because GUI-launched apps may not inherit the same shell `PATH`.
-
-### Raw server start
-
-```bash
-node dist/index.js
-```
-
-### Raw wrapper commands
+Raw wrapper commands:
 
 ```bash
 node dist/wrapper.js --codex --project-path "$HOME/projects/agent-memory" --session-id my-session
 node dist/wrapper.js --claude --project-path "$HOME/projects/agent-memory" --session-id my-session
-scripts/claude-memory.sh "$HOME/projects/agent-memory"
 ```
 
-`--claude` above is a legacy print-wrapper path (`claude -p`). Prefer hook-based Claude setup via `npm run enable:claude-wrapper`.
-
-`my-session` above is an example session id label. Use any string you want, or omit `--session-id` when using shortcut scripts.
-Add `--debug` to print per-turn memory read/write operations (get-context, upsert, capture).
-
-### Raw importer commands
-
-```bash
-node dist/importCodexSession.js \
-  --session-file "$HOME/.codex/sessions/YYYY/MM/DD/rollout-<id>.jsonl" \
-  --project-path "$HOME/projects/agent-memory" \
-  --scope project \
-  --max-facts 25
-
-node dist/importClaudeSession.js \
-  --session-file "$HOME/.claude/projects/<workspace-slug>/<session-id>.jsonl" \
-  --project-path "$HOME/projects/agent-memory" \
-  --scope project \
-  --max-facts 25
-
-node dist/importChatgptExport.js \
-  --export-zip "$HOME/Downloads/ChatGPT Data Download.zip" \
-  --capture-scope global \
-  --branch-strategy active \
-  --coverage all \
-  --max-facts 5
-```
-
-### Importer binaries
+Importer binaries:
 
 ```bash
 agent-memory-import-codex --session-file "$HOME/.codex/sessions/YYYY/MM/DD/rollout-<id>.jsonl"
 agent-memory-import-claude --session-file "$HOME/.claude/projects/<workspace-slug>/<session-id>.jsonl"
 ```
 
-### Optional npm convenience commands
-
-```bash
-npm run import:codex:latest -- --project-path "$HOME/projects/agent-memory"
-npm run import:claude:latest -- --project-path "$HOME/projects/agent-memory"
-```
-
-## Release Checklist
-
-Before cutting the next GitHub/source release:
-
-1. Confirm the git worktree is clean.
-2. Decide the version bump and update release notes.
-3. Run `npm run release:check`.
-4. Create an annotated tag for the release version.
-5. Publish the GitHub release notes.
-6. State explicitly in the release notes that npm publish is out of scope for this release.
-
-### Optional client-class override (testing/ops)
+Optional client-class override:
 
 ```bash
 AGENT_MEMORY_CLIENT_CLASS_OVERRIDE=constrained node dist/index.js
 ```
 
-Allowed values: `auto` (default), `rich`, `constrained`, `unknown`.
+Allowed values: `auto`, `rich`, `constrained`, `unknown`
 
 ## Limitations
 
-- Embeddings are optional; lexical retrieval still works when embeddings are unavailable.
-- Transport is stdio in v1.
-- Redaction is heuristic and not a full DLP system.
+- local-first storage; no built-in multi-machine sync
+- stdio transport in v1
+- redaction is heuristic, not a full DLP system
+- embeddings are optional and depend on local Ollama availability
 
 ## Contributing
 
@@ -405,4 +353,4 @@ npm test
 
 ## License
 
-MIT.
+MIT
