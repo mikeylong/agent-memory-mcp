@@ -55,6 +55,7 @@
     "automation:cleanup": "tsx src/automationSelectiveCleanup.ts",
     "start": "node dist/index.js",
     "test": "vitest run",
+    "test:retrieval": "vitest run tests/integration/retrievalRegression.test.ts tests/unit/automationRetrievalQa.test.ts",
     "test:watch": "vitest",
     "test:integration": "vitest run tests/integration"
   },

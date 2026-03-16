@@ -288,6 +288,10 @@ Included automation-oriented CLIs:
 - `npm run -s automation:retrieval-qa`
 - `npm run -s automation:cleanup -- --dry-run|--apply [--before <iso>]`
 
+Use `npm run test:retrieval` for the fixture-driven retrieval regression suite that CI runs on every push and pull request.
+
+`npm run -s automation:retrieval-qa` remains a narrower runtime smoke check that writes and cleans a temporary session.
+
 ## Manual MCP Configuration
 
 If you do not want the installer to edit config files, add the MCP server entry manually.
@@ -348,6 +352,7 @@ Allowed values: `auto`, `rich`, `constrained`, `unknown`
 ```bash
 npm run privacy:scan
 npm run build
+npm run test:retrieval
 npm test
 ```
 
