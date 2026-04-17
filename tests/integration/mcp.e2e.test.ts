@@ -373,6 +373,11 @@ describe("agent-memory-mcp integration", () => {
       rows: 0,
       bytes: 0,
       avg_bytes: 0,
+      chunk_rows: 0,
+      chunk_bytes: 0,
+      chunked_parent_rows: 0,
+      oversized_transcript_rows: 0,
+      chunked_oversized_transcript_rows: 0,
     });
     expect(healthPayload.stats.storage.idempotency_keys).toBe(0);
     expect(healthPayload.stats.storage.max_content_bytes).toBe(0);

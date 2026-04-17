@@ -84,6 +84,7 @@ describe("automation health drift", () => {
 
     expect(report.ok).toBe(true);
     expect(report.alerts).toEqual([]);
+    expect(report.notices).toEqual([]);
     expect(report.deltas.day?.active_memories).toBe(40);
     expect(report.deltas.week?.db_size_bytes).toBe(150);
   });
@@ -151,6 +152,97 @@ describe("automation health drift", () => {
         "expired_active_streak",
         "max_content_outlier",
       ]),
+    );
+  });
+
+  it("downgrades oversized embedded memories to notices", () => {
+    const baseline = makeHealth();
+    const report = buildHealthDriftReport(
+      snapshot(
+        "2026-03-08T10:00:00.000Z",
+        makeHealth({
+          stats: {
+            ...baseline.stats,
+            memories: { ...baseline.stats.memories, active: 90 },
+            embeddings: { ...baseline.stats.embeddings, rows: 90 },
+            storage: {
+              ...baseline.stats.storage,
+              max_content_bytes: 1024 * 1024 + 1,
+            },
+          },
+        }),
+      ),
+      [],
+      "/tmp/health-history.json",
+    );
+
+    expect(report.ok).toBe(true);
+    expect(report.alerts).toEqual([]);
+    expect(report.notices.map((notice) => notice.code)).toContain(
+      "max_content_outlier_embedded",
+    );
+  });
+
+  it("keeps oversized transcript rows as alerts until chunk coverage is complete", () => {
+    const baseline = makeHealth();
+    const report = buildHealthDriftReport(
+      snapshot(
+        "2026-03-08T10:00:00.000Z",
+        makeHealth({
+          stats: {
+            ...baseline.stats,
+            memories: { ...baseline.stats.memories, active: 90 },
+            embeddings: {
+              ...baseline.stats.embeddings,
+              rows: 90,
+              oversized_transcript_rows: 2,
+              chunked_oversized_transcript_rows: 1,
+            },
+            storage: {
+              ...baseline.stats.storage,
+              max_content_bytes: 1024 * 1024 + 1,
+            },
+          },
+        }),
+      ),
+      [],
+      "/tmp/health-history.json",
+    );
+
+    expect(report.ok).toBe(false);
+    expect(report.alerts.map((alert) => alert.code)).toContain("max_content_outlier");
+  });
+
+  it("downgrades oversized transcript rows to notices when parent and chunk coverage is complete", () => {
+    const baseline = makeHealth();
+    const report = buildHealthDriftReport(
+      snapshot(
+        "2026-03-08T10:00:00.000Z",
+        makeHealth({
+          stats: {
+            ...baseline.stats,
+            memories: { ...baseline.stats.memories, active: 90 },
+            embeddings: {
+              ...baseline.stats.embeddings,
+              rows: 90,
+              oversized_transcript_rows: 2,
+              chunked_oversized_transcript_rows: 2,
+            },
+            storage: {
+              ...baseline.stats.storage,
+              max_content_bytes: 1024 * 1024 + 1,
+            },
+          },
+        }),
+      ),
+      [],
+      "/tmp/health-history.json",
+    );
+
+    expect(report.ok).toBe(true);
+    expect(report.alerts).toEqual([]);
+    expect(report.notices.map((notice) => notice.code)).toContain(
+      "max_content_outlier_chunked",
     );
   });
 });

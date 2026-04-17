@@ -2,10 +2,15 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { MemoryDb } from "../src/db/client.js";
-import { DisabledEmbeddingsProvider } from "../src/embeddings/provider.js";
+import {
+  DisabledEmbeddingsProvider,
+  type EmbeddingsProvider,
+} from "../src/embeddings/provider.js";
 import { MemoryService } from "../src/memoryService.js";
 
-export async function createTestMemoryService(): Promise<{
+export async function createTestMemoryService(
+  embeddings: EmbeddingsProvider = new DisabledEmbeddingsProvider(),
+): Promise<{
   service: MemoryService;
   db: MemoryDb;
   cleanup: () => Promise<void>;
@@ -14,7 +19,7 @@ export async function createTestMemoryService(): Promise<{
   const dbPath = path.join(dir, "memory.db");
 
   const db = new MemoryDb(dbPath);
-  const service = new MemoryService(db, new DisabledEmbeddingsProvider(), "test");
+  const service = new MemoryService(db, embeddings, "test");
 
   return {
     service,

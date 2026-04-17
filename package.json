@@ -16,7 +16,9 @@
     "agent-memory-wrapper": "dist/wrapper.js",
     "agent-memory-import-codex": "dist/importCodexSession.js",
     "agent-memory-import-claude": "dist/importClaudeSession.js",
-    "agent-memory-import-chatgpt": "dist/importChatgptExport.js"
+    "agent-memory-import-chatgpt": "dist/importChatgptExport.js",
+    "agent-memory-backfill-embeddings": "dist/backfillMissingEmbeddings.js",
+    "agent-memory-chunk-transcripts": "dist/chunkTranscripts.js"
   },
   "repository": {
     "type": "git",
@@ -53,6 +55,8 @@
     "automation:import-sync": "tsx src/automationImportSync.ts",
     "automation:retrieval-qa": "tsx src/automationRetrievalQa.ts",
     "automation:cleanup": "tsx src/automationSelectiveCleanup.ts",
+    "maintenance:backfill-embeddings": "tsx src/backfillMissingEmbeddings.ts",
+    "maintenance:chunk-transcripts": "tsx src/chunkTranscripts.ts",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:retrieval": "vitest run tests/integration/retrievalRegression.test.ts tests/unit/automationRetrievalQa.test.ts",

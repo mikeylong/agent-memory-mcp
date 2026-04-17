@@ -28,6 +28,11 @@ export interface HealthDriftAlert {
   message: string;
 }
 
+export interface HealthDriftNotice {
+  code: string;
+  message: string;
+}
+
 interface HealthDelta {
   baseline_at: string;
   active_memories: number;
@@ -46,6 +51,7 @@ export interface HealthDriftReport {
   };
   expired_active_streak: number;
   alerts: HealthDriftAlert[];
+  notices: HealthDriftNotice[];
 }
 
 interface HealthDriftOptions {
@@ -136,6 +142,7 @@ export function buildHealthDriftReport(
   const dayDelta = dayBaseline ? buildDelta(current, dayBaseline) : undefined;
   const weekDelta = weekBaseline ? buildDelta(current, weekBaseline) : undefined;
   const alerts: HealthDriftAlert[] = [];
+  const notices: HealthDriftNotice[] = [];
 
   if (current.health.embeddings !== "ok") {
     alerts.push({
@@ -200,10 +207,41 @@ export function buildHealthDriftReport(
     });
   }
 
-  if (current.health.stats.storage.max_content_bytes > MAX_CONTENT_BYTES_ALERT) {
+  const parentEmbeddingCoverageComplete =
+    current.health.stats.embeddings.rows >= current.health.stats.memories.active;
+  const oversizedTranscriptRows =
+    current.health.stats.embeddings.oversized_transcript_rows ?? 0;
+  const chunkedOversizedTranscriptRows =
+    current.health.stats.embeddings.chunked_oversized_transcript_rows ?? 0;
+
+  if (
+    current.health.stats.storage.max_content_bytes > MAX_CONTENT_BYTES_ALERT &&
+    !parentEmbeddingCoverageComplete
+  ) {
     alerts.push({
       code: "max_content_outlier",
-      message: "The largest active memory exceeds 1 MB.",
+      message: "The largest active memory exceeds 1 MB while active embedding coverage is incomplete.",
+    });
+  } else if (
+    current.health.stats.storage.max_content_bytes > MAX_CONTENT_BYTES_ALERT &&
+    oversizedTranscriptRows > chunkedOversizedTranscriptRows
+  ) {
+    alerts.push({
+      code: "max_content_outlier",
+      message: "Oversized imported transcript memories exceed 1 MB without complete chunk coverage.",
+    });
+  } else if (
+    current.health.stats.storage.max_content_bytes > MAX_CONTENT_BYTES_ALERT &&
+    oversizedTranscriptRows > 0
+  ) {
+    notices.push({
+      code: "max_content_outlier_chunked",
+      message: "Oversized imported transcript memories exceed 1 MB, but parent and chunk embedding coverage is complete.",
+    });
+  } else if (current.health.stats.storage.max_content_bytes > MAX_CONTENT_BYTES_ALERT) {
+    notices.push({
+      code: "max_content_outlier_embedded",
+      message: "The largest active memory exceeds 1 MB, but active embedding coverage is complete.",
     });
   }
 
@@ -218,6 +256,7 @@ export function buildHealthDriftReport(
     },
     expired_active_streak: expiredActiveStreak,
     alerts,
+    notices,
   };
 }
 

@@ -36,6 +36,13 @@ import {
   UpsertResult,
 } from "./types.js";
 import { hashProjectPath, normalizeScope, normalizeScopes, resolveSearchScopes, scopeWhereClause } from "./scope.js";
+import {
+  DEFAULT_TRANSCRIPT_CHUNK_BYTES,
+  DEFAULT_TRANSCRIPT_CHUNK_OVERLAP_BYTES,
+  splitTranscriptIntoChunks,
+  transcriptChunkConfigVersion,
+  transcriptContentHash,
+} from "./transcriptChunks.js";
 
 interface MemoryRow {
   id: string;
@@ -54,6 +61,20 @@ interface MemoryRow {
   expires_at: string | null;
   deleted_at: string | null;
   lexical_score?: number;
+}
+
+interface MatchedEmbeddingChunk {
+  chunk_index: number;
+  content_start_byte: number;
+  content_end_byte: number;
+  parent_content_length: number;
+  content: string;
+  score: number;
+}
+
+interface SemanticCandidateMatch {
+  score: number;
+  matched_chunk?: MatchedEmbeddingChunk;
 }
 
 interface SearchInternalResult {
@@ -92,6 +113,11 @@ export interface MemoryHealthStats {
     rows: number;
     bytes: number;
     avg_bytes: number;
+    chunk_rows?: number;
+    chunk_bytes?: number;
+    chunked_parent_rows?: number;
+    oversized_transcript_rows?: number;
+    chunked_oversized_transcript_rows?: number;
   };
   storage: {
     db_size_bytes: number;
@@ -147,6 +173,7 @@ const MIN_SEARCH_CONTENT_MAX_CHARS = 120;
 const DEFAULT_SEARCH_RESPONSE_BYTES = 220000;
 const MIN_SEARCH_RESPONSE_BYTES = 1000;
 const MAX_SEARCH_RESPONSE_BYTES = 900000;
+const OVERSIZED_TRANSCRIPT_CONTENT_BYTES = 1024 * 1024;
 
 function normalizeSearchContentMaxChars(value?: number): number {
   if (value === undefined || !Number.isFinite(value)) {
@@ -198,6 +225,42 @@ function toMemoryItem(row: MemoryRow, includeMetadata: boolean): MemoryItem {
     expires_at: row.expires_at ?? undefined,
     source_agent: row.source_agent ?? undefined,
     metadata: includeMetadata ? parseJson<Record<string, unknown>>(row.metadata_json, {}) : undefined,
+  };
+}
+
+function stripMemoryItemMetadata(item: MemoryItem): MemoryItem {
+  return {
+    id: item.id,
+    scope: item.scope,
+    content: item.content,
+    tags: item.tags,
+    importance: item.importance,
+    created_at: item.created_at,
+    updated_at: item.updated_at,
+    expires_at: item.expires_at,
+    source_agent: item.source_agent,
+  };
+}
+
+function applyMatchedChunk(item: MemoryItem, match?: SemanticCandidateMatch): MemoryItem {
+  if (!match?.matched_chunk) {
+    return item;
+  }
+
+  const chunk = match.matched_chunk;
+  return {
+    ...item,
+    content: chunk.content,
+    metadata: {
+      ...(item.metadata ?? {}),
+      matched_chunk: {
+        chunk_index: chunk.chunk_index,
+        content_start_byte: chunk.content_start_byte,
+        content_end_byte: chunk.content_end_byte,
+        parent_content_length: chunk.parent_content_length,
+        semantic_score: Number(chunk.score.toFixed(6)),
+      },
+    },
   };
 }
 
@@ -491,7 +554,7 @@ export class MemoryService {
               SUM(CASE WHEN embedding_json IS NOT NULL AND deleted_at IS NULL THEN LENGTH(embedding_json) ELSE 0 END),
               0
             ) AS embedding_bytes,
-            COALESCE(MAX(CASE WHEN deleted_at IS NULL THEN LENGTH(content) END), 0) AS max_content_bytes
+            COALESCE(MAX(CASE WHEN deleted_at IS NULL THEN LENGTH(CAST(content AS BLOB)) END), 0) AS max_content_bytes
           FROM memories
         `,
       )
@@ -534,6 +597,85 @@ export class MemoryService {
 
     const embeddingRows = toWholeNumber(aggregate.embedding_rows);
     const embeddingBytes = toWholeNumber(aggregate.embedding_bytes);
+    const chunkAggregate = this.db
+      .prepare(
+        `
+          SELECT
+            COUNT(c.parent_memory_id) AS chunk_rows,
+            COALESCE(SUM(LENGTH(c.embedding_json)), 0) AS chunk_bytes,
+            COUNT(DISTINCT c.parent_memory_id) AS chunked_parent_rows
+          FROM memory_embedding_chunks c
+          JOIN memories m ON m.id = c.parent_memory_id
+          WHERE m.deleted_at IS NULL
+            AND (m.expires_at IS NULL OR m.expires_at > ?)
+        `,
+      )
+      .get(nowIso()) as {
+      chunk_rows: unknown;
+      chunk_bytes: unknown;
+      chunked_parent_rows: unknown;
+    };
+    const oversizedTranscriptRows = this.db
+      .prepare(
+        `
+          SELECT
+            id,
+            content
+          FROM memories
+          WHERE deleted_at IS NULL
+            AND (expires_at IS NULL OR expires_at > ?)
+            AND lower(tags_json) LIKE '%"import"%'
+            AND lower(tags_json) LIKE '%"transcript"%'
+            AND LENGTH(CAST(content AS BLOB)) > ?
+        `,
+      )
+      .all(nowIso(), OVERSIZED_TRANSCRIPT_CONTENT_BYTES) as Array<{
+      id: string;
+      content: string;
+    }>;
+    const defaultTranscriptChunkConfig = {
+      chunkBytes: DEFAULT_TRANSCRIPT_CHUNK_BYTES,
+      overlapBytes: DEFAULT_TRANSCRIPT_CHUNK_OVERLAP_BYTES,
+    };
+    const defaultTranscriptChunkConfigVersion = transcriptChunkConfigVersion(
+      defaultTranscriptChunkConfig,
+    );
+    const chunkState = this.db.prepare(
+      `
+        SELECT
+          COUNT(*) AS count,
+          COUNT(DISTINCT chunk_config_version) AS config_versions,
+          MIN(chunk_config_version) AS chunk_config_version,
+          COUNT(DISTINCT parent_content_hash) AS parent_hashes,
+          MIN(parent_content_hash) AS parent_content_hash
+        FROM memory_embedding_chunks
+        WHERE parent_memory_id = ?
+      `,
+    );
+    let chunkedOversizedTranscriptRows = 0;
+    for (const row of oversizedTranscriptRows) {
+      const parentHash = transcriptContentHash(row.content);
+      const expectedChunks = splitTranscriptIntoChunks(
+        row.content,
+        defaultTranscriptChunkConfig,
+      ).length;
+      const state = chunkState.get(row.id) as {
+        count: unknown;
+        config_versions: unknown;
+        chunk_config_version: string | null;
+        parent_hashes: unknown;
+        parent_content_hash: string | null;
+      };
+      if (
+        toWholeNumber(state.count) === expectedChunks &&
+        toWholeNumber(state.config_versions) === 1 &&
+        state.chunk_config_version === defaultTranscriptChunkConfigVersion &&
+        toWholeNumber(state.parent_hashes) === 1 &&
+        state.parent_content_hash === parentHash
+      ) {
+        chunkedOversizedTranscriptRows += 1;
+      }
+    }
 
     return {
       memories: {
@@ -547,6 +689,11 @@ export class MemoryService {
         rows: embeddingRows,
         bytes: embeddingBytes,
         avg_bytes: embeddingRows > 0 ? Math.round(embeddingBytes / embeddingRows) : 0,
+        chunk_rows: toWholeNumber(chunkAggregate.chunk_rows),
+        chunk_bytes: toWholeNumber(chunkAggregate.chunk_bytes),
+        chunked_parent_rows: toWholeNumber(chunkAggregate.chunked_parent_rows),
+        oversized_transcript_rows: oversizedTranscriptRows.length,
+        chunked_oversized_transcript_rows: chunkedOversizedTranscriptRows,
       },
       storage: {
         db_size_bytes: this.dbFileSizeBytes(),
@@ -1141,7 +1288,7 @@ export class MemoryService {
   private async semanticCandidates(
     query: string,
     scopes: ScopeSelector[],
-  ): Promise<{ map: Map<string, number>; embeddingsAvailable: boolean }> {
+  ): Promise<{ map: Map<string, SemanticCandidateMatch>; embeddingsAvailable: boolean }> {
     const queryEmbedding = await this.embedSafe([query]);
     if (!queryEmbedding || !queryEmbedding[0]) {
       return { map: new Map(), embeddingsAvailable: false };
@@ -1163,7 +1310,7 @@ export class MemoryService {
       )
       .all(...where.params) as Array<{ id: string; embedding_json: string | null }>;
 
-    const scored = rows
+    const scoredParents = rows
       .map((row) => {
         const vector = parseEmbedding(row.embedding_json);
         if (!vector) {
@@ -1179,9 +1326,79 @@ export class MemoryService {
       .sort((a, b) => b.similarity - a.similarity)
       .slice(0, 100);
 
-    const map = new Map<string, number>();
-    for (const row of scored) {
-      map.set(row.id, row.similarity);
+    const map = new Map<string, SemanticCandidateMatch>();
+    for (const row of scoredParents) {
+      map.set(row.id, { score: row.similarity });
+    }
+
+    const chunkRows = this.db
+      .prepare(
+        `
+          SELECT
+            c.parent_memory_id AS id,
+            c.chunk_index,
+            c.content_start_byte,
+            c.content_end_byte,
+            c.content,
+            c.embedding_json,
+            LENGTH(CAST(m.content AS BLOB)) AS parent_content_length
+          FROM memory_embedding_chunks c
+          JOIN memories m ON m.id = c.parent_memory_id
+          WHERE ${where.clause}
+            AND c.embedding_json IS NOT NULL
+          ORDER BY m.updated_at DESC, c.chunk_index ASC
+          LIMIT 5000
+        `,
+      )
+      .all(...where.params) as Array<{
+      id: string;
+      chunk_index: number;
+      content_start_byte: number;
+      content_end_byte: number;
+      content: string;
+      embedding_json: string | null;
+      parent_content_length: unknown;
+    }>;
+
+    const scoredChunks = chunkRows
+      .map((row) => {
+        const vector = parseEmbedding(row.embedding_json);
+        if (!vector) {
+          return null;
+        }
+
+        const similarity = cosineSimilarity(queryVector, vector);
+        return {
+          id: row.id,
+          similarity,
+          chunk: {
+            chunk_index: row.chunk_index,
+            content_start_byte: row.content_start_byte,
+            content_end_byte: row.content_end_byte,
+            parent_content_length: toWholeNumber(row.parent_content_length),
+            content: row.content,
+            score: similarity,
+          },
+        };
+      })
+      .filter(
+        (entry): entry is {
+          id: string;
+          similarity: number;
+          chunk: MatchedEmbeddingChunk;
+        } => entry !== null,
+      )
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, 200);
+
+    for (const row of scoredChunks) {
+      const current = map.get(row.id);
+      if (!current || row.similarity > current.score) {
+        map.set(row.id, {
+          score: row.similarity,
+          matched_chunk: row.chunk,
+        });
+      }
     }
 
     return { map, embeddingsAvailable: true };
@@ -1265,16 +1482,16 @@ export class MemoryService {
     const ranked = rerankGenericRetrievalCandidates(
       rows.map((row) => {
         const lexicalScore = lexicalFromBm25(lexicalMap.get(row.id));
-        const semanticScore = semanticResult.map.get(row.id);
+        const semanticMatch = semanticResult.map.get(row.id);
         const score = combineScore({
           lexical: lexicalScore,
-          semantic: semanticScore,
+          semantic: semanticMatch?.score,
           importance: row.importance,
           recency: recencyScore(row.updated_at),
           scopeType: row.scope_type,
           embeddingsAvailable: semanticResult.embeddingsAvailable,
         });
-        const item = toMemoryItem(row, true);
+        const item = applyMatchedChunk(toMemoryItem(row, true), semanticMatch);
 
         return {
           id: row.id,
@@ -1290,7 +1507,7 @@ export class MemoryService {
 
     const selected = ranked.slice(0, limit);
     const items = selected.map((entry) =>
-      input.include_metadata ?? false ? entry.item : toMemoryItem(entry.value, false),
+      input.include_metadata ?? false ? entry.item : stripMemoryItemMetadata(entry.item),
     );
 
     this.touchRows(items.map((item) => item.id));

@@ -20,6 +20,10 @@ const MIGRATIONS: Migration[] = [
     version: 3,
     fileName: "003_canonical_repair.sql",
   },
+  {
+    version: 4,
+    fileName: "004_memory_embedding_chunks.sql",
+  },
 ];
 
 function readMigrationSql(fileName: string): string {
