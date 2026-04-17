@@ -287,6 +287,7 @@ Included automation-oriented CLIs:
 - `npm run -s automation:import-sync -- --project-path <path>`
 - `npm run -s automation:retrieval-qa`
 - `npm run -s automation:cleanup -- --dry-run|--apply [--before <iso>]`
+- `npm run -s automation:cleanup -- --apply --expired-only --expired-grace-days 0`
 
 Maintenance CLIs:
 

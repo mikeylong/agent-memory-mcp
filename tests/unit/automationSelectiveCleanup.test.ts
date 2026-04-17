@@ -82,4 +82,59 @@ describe("automation selective cleanup", () => {
       await cleanup();
     }
   });
+
+  it("can target only expired TTL rows without captured noise", async () => {
+    const { service, db, cleanup } = await createTestMemoryService();
+
+    try {
+      const expiredTarget = await service.upsert({
+        scope: { type: "global" },
+        content: "Just expired TTL memory",
+        ttl_days: 1,
+      });
+      const capturedTarget = await service.upsert({
+        scope: { type: "project", id: "/tmp/project-cleanup" },
+        content: "Old captured row that should stay",
+        tags: ["captured"],
+        metadata: { captured: true },
+      });
+
+      db.db
+        .prepare("UPDATE memories SET expires_at = ?, updated_at = ? WHERE id = ?")
+        .run("2026-03-11T12:00:00.000Z", "2026-03-11T12:00:00.000Z", expiredTarget.id);
+      db.db
+        .prepare("UPDATE memories SET updated_at = ? WHERE id = ?")
+        .run("2026-01-01T00:00:00.000Z", capturedTarget.id);
+
+      const report = collectCleanupReport(db.db, new Date("2026-03-12T12:00:00.000Z"), 10, {
+        expiredOnly: true,
+        expiredGraceDays: 0,
+      });
+      expect(report.policy).toBe("expired-only");
+      expect(report.counts).toEqual({
+        expired: 1,
+        captured_noise: 0,
+        total: 1,
+      });
+
+      const deleted = applyCleanup(
+        db.db,
+        report,
+        "2026-03-12T13:00:00.000Z",
+      );
+      expect(deleted).toBe(1);
+
+      const rows = db.db
+        .prepare("SELECT id, deleted_at FROM memories WHERE id IN (?, ?)")
+        .all(expiredTarget.id, capturedTarget.id) as Array<{
+        id: string;
+        deleted_at: string | null;
+      }>;
+      const deletedById = new Map(rows.map((row) => [row.id, row.deleted_at]));
+      expect(deletedById.get(expiredTarget.id)).toBe("2026-03-12T13:00:00.000Z");
+      expect(deletedById.get(capturedTarget.id)).toBeNull();
+    } finally {
+      await cleanup();
+    }
+  });
 });
