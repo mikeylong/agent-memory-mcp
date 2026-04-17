@@ -148,7 +148,7 @@ Healthy first-run shape:
   "ok": true,
   "db": "ok",
   "embeddings": "ok",
-  "version": "0.2.0 (schema 3)",
+  "version": "0.2.0 (schema 4)",
   "retrieval_mode": "semantic+lexical",
   "embeddings_provider": "ollama",
   "embeddings_reason": "healthy",
@@ -287,6 +287,14 @@ Included automation-oriented CLIs:
 - `npm run -s automation:import-sync -- --project-path <path>`
 - `npm run -s automation:retrieval-qa`
 - `npm run -s automation:cleanup -- --dry-run|--apply [--before <iso>]`
+- `npm run -s automation:cleanup -- --apply --expired-only --expired-grace-days 0`
+
+Maintenance CLIs:
+
+- `npm run -s maintenance:backfill-embeddings -- --dry-run`
+- `npm run -s maintenance:backfill-embeddings -- --apply [--limit <n>] [--batch-size <n>] [--max-content-bytes <n>] [--embedding-input-bytes <n>]`
+- `npm run -s maintenance:chunk-transcripts -- --dry-run`
+- `npm run -s maintenance:chunk-transcripts -- --apply [--limit <n>] [--batch-size <n>] [--min-content-bytes <n>] [--chunk-bytes <n>] [--overlap-bytes <n>]`
 
 Use `npm run test:retrieval` for the fixture-driven retrieval regression suite that CI runs on every push and pull request.
 

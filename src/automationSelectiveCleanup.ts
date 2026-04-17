@@ -3,13 +3,17 @@ import type { Database } from "better-sqlite3";
 import { pathToFileURL } from "node:url";
 import { createConfiguredRuntime, parsePositiveInt } from "./automationCommon.js";
 
-const EXPIRED_GRACE_DAYS = 7;
+const DEFAULT_EXPIRED_GRACE_DAYS = 7;
 const CAPTURED_GRACE_DAYS = 45;
+
+type CleanupPolicy = "moderate" | "expired-only";
 
 interface CleanupOptions {
   dryRun: boolean;
   before?: string;
   sampleLimit: number;
+  expiredOnly: boolean;
+  expiredGraceDays: number;
 }
 
 interface CleanupRow {
@@ -31,7 +35,7 @@ export interface CleanupCandidate {
 }
 
 export interface CleanupReport {
-  policy: "moderate";
+  policy: CleanupPolicy;
   dry_run: boolean;
   reference_time: string;
   thresholds: {
@@ -57,6 +61,9 @@ function helpText(): string {
     "Options:",
     "  --dry-run            Preview cleanup candidates without deleting anything (default)",
     "  --apply              Apply the moderate cleanup policy",
+    "  --expired-only       Only clean expired TTL rows; do not clean old captured noise",
+    "  --expired-grace-days <n>",
+    "                       Days after expires_at before a TTL row is eligible (default: 7)",
     "  --before <iso>       Evaluate age thresholds relative to this ISO timestamp",
     "  --sample-limit <n>   Max sample rows per cleanup category (default: 5)",
     "  -h, --help           Show this help text",
@@ -67,6 +74,8 @@ function parseArgs(argv: string[]): CleanupOptions {
   let dryRun = true;
   let before: string | undefined;
   let sampleLimit = 5;
+  let expiredOnly = false;
+  let expiredGraceDays = DEFAULT_EXPIRED_GRACE_DAYS;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -82,6 +91,21 @@ function parseArgs(argv: string[]): CleanupOptions {
 
     if (arg === "--apply") {
       dryRun = false;
+      continue;
+    }
+
+    if (arg === "--expired-only") {
+      expiredOnly = true;
+      continue;
+    }
+
+    if (arg === "--expired-grace-days") {
+      const value = argv[i + 1];
+      if (!value) {
+        throw new Error("--expired-grace-days requires a value");
+      }
+      expiredGraceDays = parseNonNegativeInt(value, "--expired-grace-days");
+      i += 1;
       continue;
     }
 
@@ -112,7 +136,17 @@ function parseArgs(argv: string[]): CleanupOptions {
     dryRun,
     before,
     sampleLimit,
+    expiredOnly,
+    expiredGraceDays,
   };
+}
+
+function parseNonNegativeInt(value: string, flag: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${flag} must be a non-negative integer`);
+  }
+  return parsed;
 }
 
 function isoDaysBefore(referenceTime: Date, days: number): string {
@@ -178,21 +212,29 @@ export function collectCleanupReport(
   db: Database,
   referenceTime: Date,
   sampleLimit: number,
+  options: {
+    expiredOnly?: boolean;
+    expiredGraceDays?: number;
+  } = {},
 ): CleanupReport {
-  const expiredBefore = isoDaysBefore(referenceTime, EXPIRED_GRACE_DAYS);
+  const expiredOnly = options.expiredOnly ?? false;
+  const expiredGraceDays = options.expiredGraceDays ?? DEFAULT_EXPIRED_GRACE_DAYS;
+  const expiredBefore = isoDaysBefore(referenceTime, expiredGraceDays);
   const capturedBefore = isoDaysBefore(referenceTime, CAPTURED_GRACE_DAYS);
   const expiredRows = queryExpiredCandidates(db, expiredBefore);
   const expiredIds = new Set(expiredRows.map((row) => row.id));
-  const capturedRows = queryCapturedCandidates(db, capturedBefore).filter(
-    (row) => !expiredIds.has(row.id),
-  );
+  const capturedRows = expiredOnly
+    ? []
+    : queryCapturedCandidates(db, capturedBefore).filter(
+        (row) => !expiredIds.has(row.id),
+      );
 
   return {
-    policy: "moderate",
+    policy: expiredOnly ? "expired-only" : "moderate",
     dry_run: true,
     reference_time: referenceTime.toISOString(),
     thresholds: {
-      expired_grace_days: EXPIRED_GRACE_DAYS,
+      expired_grace_days: expiredGraceDays,
       captured_grace_days: CAPTURED_GRACE_DAYS,
     },
     counts: {
@@ -218,13 +260,16 @@ export function applyCleanup(
   }
 
   const referenceTime = report.reference_time;
-  const expiredBefore = isoDaysBefore(new Date(referenceTime), EXPIRED_GRACE_DAYS);
+  const expiredBefore = isoDaysBefore(new Date(referenceTime), report.thresholds.expired_grace_days);
   const capturedBefore = isoDaysBefore(new Date(referenceTime), CAPTURED_GRACE_DAYS);
   const expiredRows = queryExpiredCandidates(db, expiredBefore);
   const expiredIds = new Set(expiredRows.map((row) => row.id));
-  const capturedRows = queryCapturedCandidates(db, capturedBefore).filter(
-    (row) => !expiredIds.has(row.id),
-  );
+  const capturedRows =
+    report.policy === "expired-only"
+      ? []
+      : queryCapturedCandidates(db, capturedBefore).filter(
+          (row) => !expiredIds.has(row.id),
+        );
   const ids = [...expiredRows, ...capturedRows].map((row) => row.id);
 
   if (ids.length === 0) {
@@ -258,7 +303,10 @@ export async function runSelectiveCleanup(
       throw new Error(`Invalid ISO timestamp for --before: '${options.before}'`);
     }
 
-    const report = collectCleanupReport(runtime.db.db, referenceTime, options.sampleLimit);
+    const report = collectCleanupReport(runtime.db.db, referenceTime, options.sampleLimit, {
+      expiredOnly: options.expiredOnly,
+      expiredGraceDays: options.expiredGraceDays,
+    });
     report.dry_run = options.dryRun;
 
     if (!options.dryRun) {
