@@ -61,11 +61,14 @@ required_files=(
   "dist/importCodexSession.js"
   "dist/importClaudeSession.js"
   "dist/importChatgptExport.js"
+  "dist/backfillMissingEmbeddings.js"
+  "dist/chunkTranscripts.js"
   "dist/claudeHook.js"
   "dist/configureClaudeHooks.js"
   "dist/db/schema/001_init.sql"
   "dist/db/schema/002_canonical_key.sql"
   "dist/db/schema/003_canonical_repair.sql"
+  "dist/db/schema/004_memory_embedding_chunks.sql"
 )
 
 for file in "${required_files[@]}"; do
@@ -89,6 +92,8 @@ node dist/wrapper.js --help >/dev/null
 (node dist/importCodexSession.js --help 2>&1 || true) | grep -q "Usage: agent-memory-import-codex"
 (node dist/importClaudeSession.js --help 2>&1 || true) | grep -q "Usage: agent-memory-import-claude"
 (node dist/importChatgptExport.js --help 2>&1 || true) | grep -q "Usage: agent-memory-import-chatgpt"
+(node dist/backfillMissingEmbeddings.js --help 2>&1 || true) | grep -q "Usage: agent-memory-backfill-embeddings"
+(node dist/chunkTranscripts.js --help 2>&1 || true) | grep -q "Usage: agent-memory-chunk-transcripts"
 
 echo "Smoke testing documented shell helpers..."
 bash scripts/codex-memory.sh --help >/dev/null

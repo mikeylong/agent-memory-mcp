@@ -148,7 +148,7 @@ Healthy first-run shape:
   "ok": true,
   "db": "ok",
   "embeddings": "ok",
-  "version": "0.2.0 (schema 4)",
+  "version": "0.3.0 (schema 4)",
   "retrieval_mode": "semantic+lexical",
   "embeddings_provider": "ollama",
   "embeddings_reason": "healthy",
