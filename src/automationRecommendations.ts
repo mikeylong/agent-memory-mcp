@@ -9,6 +9,10 @@ export interface RecommendedAutomationDefinition {
   rrule: string;
   status: "ACTIVE";
   cwds: string[];
+  kind?: "cron";
+  executionEnvironment?: "local" | "worktree";
+  model?: string;
+  reasoningEffort?: string;
 }
 
 export interface RecommendedAutomation extends RecommendedAutomationDefinition {
@@ -32,10 +36,14 @@ export interface AutomationBootstrapReport {
 interface DiscoveredAutomation {
   id: string;
   file_path: string;
+  kind?: string;
   name?: string;
   prompt?: string;
   rrule?: string;
   status?: string;
+  executionEnvironment?: string;
+  model?: string;
+  reasoningEffort?: string;
   cwds: string[];
 }
 
@@ -49,17 +57,29 @@ const QA_PROMPT =
   "Run npm run -s automation:retrieval-qa in the repo. Report pass or fail, the assertion results, the top search and context results, and the cleanup deleted count. If it fails, list the failing assertions first.";
 const CLEANUP_PROMPT =
   "Run npm run -s automation:cleanup -- --dry-run first. If counts.total is 0, report that no cleanup is needed and stop. Otherwise run npm run -s automation:cleanup -- --apply and report deleted counts plus candidate samples for expired and captured_noise. Call out any unexpected canonical or preference-like candidates before applying.";
+const MEMORY_DURABILITY_AUDIT_PROMPT =
+  'Run an audit-only Agent Memory durability check. Inspect recently added memories and recent ChatGPT-export synthesis artifacts when available. Classify new rows as durable global preference, durable project memory, ephemeral/noise, currentness-sensitive, sensitive, or transcript/provenance. Upsert only high-confidence durable preferences, facts, and project conventions with the correct scope. Do not delete memories, do not run soft-delete scripts, and do not mutate transcript/provenance rows. Build non-mutating allowlists only when source rows are clearly redundant after synthesis. Open an inbox item titled "Memory durability audit result" with counts reviewed, upserts created, rows intentionally ignored, validation issues, hard-stop concerns, and whether the audit completed without failure.';
 
 export const CANONICAL_AUTOMATION_NAMES = [
   "Memory health drift",
   "Memory import sync",
   "Memory QA smoke",
   "Memory cleanup",
+  "Memory Durability Audit",
 ] as const;
 
 function extractStringField(content: string, key: string): string | undefined {
-  const match = content.match(new RegExp(`^\\s*${key}\\s*=\\s*"([^"]*)"\\s*$`, "m"));
-  return match?.[1];
+  const match = content.match(new RegExp(`^\\s*${key}\\s*=\\s*("(?:\\\\.|[^"\\\\])*")\\s*$`, "m"));
+  if (!match) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(match[1]);
+    return typeof parsed === "string" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function extractArrayField(content: string, key: string): string[] | undefined {
@@ -93,10 +113,17 @@ function parseAutomationFile(filePath: string): DiscoveredAutomation | null {
   return {
     id: path.basename(path.dirname(filePath)),
     file_path: filePath,
+    kind: extractStringField(content, "kind"),
     name: extractStringField(content, "name"),
     prompt: extractStringField(content, "prompt"),
     rrule: extractStringField(content, "rrule"),
     status: extractStringField(content, "status"),
+    executionEnvironment:
+      extractStringField(content, "executionEnvironment") ??
+      extractStringField(content, "execution_environment"),
+    model: extractStringField(content, "model"),
+    reasoningEffort:
+      extractStringField(content, "reasoningEffort") ?? extractStringField(content, "reasoning_effort"),
     cwds,
   };
 }
@@ -117,6 +144,10 @@ function arraysEqual(left: string[], right: string[]): boolean {
 
 function normalizePaths(entries: string[]): string[] {
   return entries.map((entry) => path.resolve(entry));
+}
+
+function optionalStringMatches(expected: string | undefined, discovered: string | undefined): boolean {
+  return expected === undefined || discovered === expected;
 }
 
 function discoverAutomations(codexHome: string): DiscoveredAutomation[] {
@@ -144,6 +175,10 @@ function isExactMatch(
     discovered.prompt === expected.prompt &&
     discovered.rrule === expected.rrule &&
     discovered.status === expected.status &&
+    optionalStringMatches(expected.kind, discovered.kind) &&
+    optionalStringMatches(expected.executionEnvironment, discovered.executionEnvironment) &&
+    optionalStringMatches(expected.model, discovered.model) &&
+    optionalStringMatches(expected.reasoningEffort, discovered.reasoningEffort) &&
     arraysEqual(normalizePaths(discovered.cwds), normalizePaths(expected.cwds))
   );
 }
@@ -183,6 +218,17 @@ export function buildRecommendedAutomationDefinitions(
       rrule: "FREQ=WEEKLY;BYDAY=SU;BYHOUR=11;BYMINUTE=0",
       status: "ACTIVE",
       cwds: [resolvedRepoPath],
+    },
+    {
+      name: "Memory Durability Audit",
+      prompt: MEMORY_DURABILITY_AUDIT_PROMPT,
+      rrule: "FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=0",
+      status: "ACTIVE",
+      cwds: [resolvedRepoPath],
+      kind: "cron",
+      executionEnvironment: "local",
+      model: "gpt-5.4-mini",
+      reasoningEffort: "medium",
     },
   ];
 }

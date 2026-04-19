@@ -29,6 +29,7 @@ function makeAutomationReport(repoPath: string, projectPath: string, presentName
     "Memory import sync",
     "Memory QA smoke",
     "Memory cleanup",
+    "Memory Durability Audit",
   ];
 
   return {
@@ -156,7 +157,7 @@ describe("install-clients.sh", () => {
     expect(result.stdout).toContain(`Target project path: ${projectPath}`);
     expect(result.stdout).toContain("Already present: none");
     expect(result.stdout).toContain(
-      "Missing: Memory health drift, Memory import sync, Memory QA smoke, Memory cleanup",
+      "Missing: Memory health drift, Memory import sync, Memory QA smoke, Memory cleanup, Memory Durability Audit",
     );
     expect(result.stdout).toContain("Codex next step: run npm run -s automation:bootstrap -- --project-path");
   });
@@ -170,6 +171,7 @@ describe("install-clients.sh", () => {
       "Memory import sync",
       "Memory QA smoke",
       "Memory cleanup",
+      "Memory Durability Audit",
     ];
     fs.mkdirSync(projectPath, { recursive: true });
     writeAutomationBootstrapFixture(repoPath, makeAutomationReport(repoPath, projectPath, presentNames));
@@ -179,7 +181,7 @@ describe("install-clients.sh", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("Recommended automations:");
     expect(result.stdout).toContain(
-      "Already present: Memory health drift, Memory import sync, Memory QA smoke, Memory cleanup",
+      "Already present: Memory health drift, Memory import sync, Memory QA smoke, Memory cleanup, Memory Durability Audit",
     );
     expect(result.stdout).toContain("Missing: none");
     expect(result.stdout).toContain("Codex next step: all recommended automations are already present.");

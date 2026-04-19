@@ -24,14 +24,27 @@ function writeAutomationToml(
     status: string;
     rrule: string;
     cwds: string[];
+    kind?: string;
+    executionEnvironment?: string;
+    model?: string;
+    reasoningEffort?: string;
   },
 ): void {
   const automationDir = path.join(codexHome, "automations", id);
   fs.mkdirSync(automationDir, { recursive: true });
+  const runtimeFields = [
+    `kind = ${JSON.stringify(automation.kind ?? "automation")}`,
+    automation.executionEnvironment
+      ? `execution_environment = ${JSON.stringify(automation.executionEnvironment)}`
+      : undefined,
+    automation.model ? `model = ${JSON.stringify(automation.model)}` : undefined,
+    automation.reasoningEffort ? `reasoning_effort = ${JSON.stringify(automation.reasoningEffort)}` : undefined,
+  ].filter((entry): entry is string => entry !== undefined);
+
   fs.writeFileSync(
     path.join(automationDir, "automation.toml"),
     [
-      'kind = "automation"',
+      ...runtimeFields,
       'version = "1"',
       `name = ${JSON.stringify(automation.name)}`,
       `prompt = ${JSON.stringify(automation.prompt)}`,
@@ -51,7 +64,7 @@ afterEach(() => {
 });
 
 describe("automation bootstrap recommendations", () => {
-  it("returns the four canonical automation definitions with missing presence by default", () => {
+  it("returns the five canonical automation definitions with missing presence by default", () => {
     const codexHome = tempDir("agent-memory-bootstrap-codex-");
     const repoPath = tempDir("agent-memory-bootstrap-repo-");
     const projectPath = "/path/to/workspace";
@@ -63,9 +76,9 @@ describe("automation bootstrap recommendations", () => {
     });
 
     expect(report.summary).toEqual({
-      total: 4,
+      total: 5,
       present: 0,
-      missing: 4,
+      missing: 5,
     });
     expect(
       report.automations.map((automation) => ({
@@ -107,7 +120,22 @@ describe("automation bootstrap recommendations", () => {
         cwds: [repoPath],
         presence: "missing",
       },
+      {
+        name: "Memory Durability Audit",
+        rrule: "FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=0",
+        prompt:
+          'Run an audit-only Agent Memory durability check. Inspect recently added memories and recent ChatGPT-export synthesis artifacts when available. Classify new rows as durable global preference, durable project memory, ephemeral/noise, currentness-sensitive, sensitive, or transcript/provenance. Upsert only high-confidence durable preferences, facts, and project conventions with the correct scope. Do not delete memories, do not run soft-delete scripts, and do not mutate transcript/provenance rows. Build non-mutating allowlists only when source rows are clearly redundant after synthesis. Open an inbox item titled "Memory durability audit result" with counts reviewed, upserts created, rows intentionally ignored, validation issues, hard-stop concerns, and whether the audit completed without failure.',
+        cwds: [repoPath],
+        presence: "missing",
+      },
     ]);
+
+    expect(report.automations.find((automation) => automation.name === "Memory Durability Audit")).toMatchObject({
+      kind: "cron",
+      executionEnvironment: "local",
+      model: "gpt-5.4-mini",
+      reasoningEffort: "medium",
+    });
   });
 
   it("marks automations as present when matching TOMLs already exist", () => {
@@ -117,7 +145,19 @@ describe("automation bootstrap recommendations", () => {
     const definitions = buildRecommendedAutomationDefinitions(projectPath, repoPath);
 
     definitions.forEach((automation, index) => {
-      writeAutomationToml(codexHome, `automation-${index + 1}`, automation);
+      writeAutomationToml(
+        codexHome,
+        `automation-${index + 1}`,
+        automation.name === "Memory health drift"
+          ? {
+              ...automation,
+              kind: "cron",
+              executionEnvironment: "local",
+              model: "gpt-5.4-mini",
+              reasoningEffort: "medium",
+            }
+          : automation,
+      );
     });
 
     const report = buildAutomationBootstrapReport({
@@ -127,8 +167,8 @@ describe("automation bootstrap recommendations", () => {
     });
 
     expect(report.summary).toEqual({
-      total: 4,
-      present: 4,
+      total: 5,
+      present: 5,
       missing: 0,
     });
     expect(report.automations.every((automation) => automation.presence === "present")).toBe(true);
@@ -137,6 +177,7 @@ describe("automation bootstrap recommendations", () => {
       "automation-2",
       "automation-3",
       "automation-4",
+      "automation-5",
     ]);
   });
 });

@@ -278,8 +278,13 @@ The bootstrap output is the onboarding source of truth for:
 - automation name
 - schedule
 - prompt
+- runtime settings such as model, reasoning effort, and execution environment when specified
 - workspace cwd
 - whether each automation already exists under `~/.codex/automations`
+
+Recommended prompt-driven automations:
+
+- `Memory Durability Audit`: audit-only weekly memory-quality pass. It classifies recent memories, upserts only high-confidence durable preferences/facts/project conventions, preserves transcripts and provenance rows, and does not run deletion or soft-delete scripts.
 
 Included automation-oriented CLIs:
 
