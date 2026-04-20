@@ -303,7 +303,7 @@ Maintenance CLIs:
 
 Use `npm run test:retrieval` for the fixture-driven retrieval regression suite that CI runs on every push and pull request.
 
-`npm run -s automation:retrieval-qa` remains a narrower runtime smoke check that writes and cleans a temporary session.
+`npm run -s automation:retrieval-qa` remains a narrower runtime smoke check that writes and cleans a temporary session in an isolated temporary database. Use `npm run -s automation:retrieval-qa -- --configured-runtime` when you specifically want to check the configured `AGENT_MEMORY_DB_PATH`.
 
 ## Manual MCP Configuration
 

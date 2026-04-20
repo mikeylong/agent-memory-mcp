@@ -1,8 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { runRetrievalQa } from "../../src/automationRetrievalQa.js";
+import {
+  parseRetrievalQaArgs,
+  runRetrievalQa,
+} from "../../src/automationRetrievalQa.js";
 import { createTestMemoryService } from "../helpers.js";
 
 describe("automation retrieval QA", () => {
+  it("uses an isolated runtime unless the configured runtime is requested", () => {
+    expect(parseRetrievalQaArgs([]).runtimeMode).toBe("isolated");
+    expect(parseRetrievalQaArgs(["--configured-runtime"]).runtimeMode).toBe("configured");
+  });
+
   it("verifies canonical retrieval and cleans up the temporary session", async () => {
     const { service, cleanup } = await createTestMemoryService();
 

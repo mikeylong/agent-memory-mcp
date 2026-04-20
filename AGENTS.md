@@ -22,6 +22,13 @@ Use the `agent-memory` MCP server tools on every conversation turn.
 - Use `scope: {"type":"global"}` for user-wide preferences.
 - Use `scope: {"type":"project"}` with `metadata.project_path` for repository-specific conventions.
 
+## Retrieval Tool Guidance
+
+- Use `memory_get_context` as the default retrieval tool before drafting because it returns scope-aware context and de-prioritizes noisy global captured/import transcript memories.
+- Use `memory_search` for explicit lookup when the task needs targeted facts beyond the default turn context.
+- Use `memory_search_compact` only when a strict payload limit requires a smaller response.
+- Do not treat `memory_search_compact` as the normal safe default.
+
 ## Failure Behavior
 
 - If memory tool calls fail or time out, continue the user task normally and note the memory failure briefly.

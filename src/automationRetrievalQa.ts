@@ -1,20 +1,37 @@
 #!/usr/bin/env node
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { createConfiguredRuntime } from "./automationCommon.js";
-import type { MemoryService } from "./memoryService.js";
+import {
+  type ConfiguredRuntime,
+  createConfiguredRuntime,
+} from "./automationCommon.js";
+import { MemoryDb } from "./db/client.js";
+import { DisabledEmbeddingsProvider } from "./embeddings/provider.js";
+import { MemoryService } from "./memoryService.js";
 import type { ScopeRef } from "./types.js";
 
 const QA_SUBJECT = "qa smoke zebra color";
 const QA_CANONICAL_KEY = "favorite_qa_smoke_zebra_color";
+const QA_VERSION = "0.3.0";
+
+export type RetrievalQaRuntimeMode = "isolated" | "configured";
 
 interface RetrievalQaOptions {
   sessionId?: string;
+}
+
+export interface RetrievalQaCliOptions extends RetrievalQaOptions {
+  runtimeMode: RetrievalQaRuntimeMode;
 }
 
 export interface RetrievalQaReport {
   pass: boolean;
   session_id: string;
   query: string;
+  runtime_mode?: RetrievalQaRuntimeMode;
+  db_path?: string;
   upserts: {
     first_id: string;
     second_id: string;
@@ -32,12 +49,15 @@ function helpText(): string {
     "",
     "Options:",
     "  --session-id <id>   Override the temporary session id used for the smoke test",
+    "  --configured-runtime",
+    "                     Use the configured AGENT_MEMORY_DB_PATH instead of an isolated temp DB",
     "  -h, --help          Show this help text",
   ].join("\n");
 }
 
-function parseArgs(argv: string[]): RetrievalQaOptions {
+export function parseRetrievalQaArgs(argv: string[]): RetrievalQaCliOptions {
   let sessionId: string | undefined;
+  let runtimeMode: RetrievalQaRuntimeMode = "isolated";
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -56,10 +76,51 @@ function parseArgs(argv: string[]): RetrievalQaOptions {
       continue;
     }
 
+    if (arg === "--configured-runtime") {
+      runtimeMode = "configured";
+      continue;
+    }
+
     throw new Error(`Unknown argument: ${arg}`);
   }
 
-  return { sessionId };
+  return { sessionId, runtimeMode };
+}
+
+function createIsolatedRuntime(): ConfiguredRuntime {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-memory-retrieval-qa-"));
+  const dbPath = path.join(dataDir, "memory.db");
+  const db = new MemoryDb(dbPath);
+  const memory = new MemoryService(
+    db,
+    new DisabledEmbeddingsProvider(),
+    `${QA_VERSION}-automation-qa`,
+  );
+
+  return {
+    config: {
+      dataDir,
+      dbPath,
+      ollamaUrl: "",
+      embeddingModel: "disabled",
+      embeddingsDisabled: true,
+      version: QA_VERSION,
+    },
+    db,
+    memory,
+    close: () => {
+      db.close();
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    },
+  };
+}
+
+function createRetrievalQaRuntime(mode: RetrievalQaRuntimeMode): ConfiguredRuntime {
+  if (mode === "configured") {
+    return createConfiguredRuntime("automation-qa");
+  }
+
+  return createIsolatedRuntime();
 }
 
 export async function runRetrievalQa(
@@ -136,17 +197,26 @@ export async function runRetrievalQa(
       cleanup_deleted_count: cleanupDeletedCount,
     };
   } catch (error) {
-    cleanupDeletedCount = memory.forgetScope(scope).deleted_count;
+    try {
+      cleanupDeletedCount = memory.forgetScope(scope).deleted_count;
+    } catch {
+      // Preserve the original failure; cleanup can also fail if the DB is read-only.
+    }
     throw error;
   }
 }
 
 async function main(): Promise<void> {
-  const runtime = createConfiguredRuntime("automation-qa");
+  const options = parseRetrievalQaArgs(process.argv.slice(2));
+  const runtime = createRetrievalQaRuntime(options.runtimeMode);
 
   try {
-    const report = await runRetrievalQa(runtime.memory, parseArgs(process.argv.slice(2)));
-    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    const report = await runRetrievalQa(runtime.memory, options);
+    process.stdout.write(`${JSON.stringify({
+      ...report,
+      runtime_mode: options.runtimeMode,
+      db_path: runtime.config.dbPath,
+    }, null, 2)}\n`);
     if (!report.pass) {
       process.exitCode = 1;
     }
