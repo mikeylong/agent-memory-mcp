@@ -18,10 +18,13 @@ export interface ImportOptions {
   scopeType: "global" | "project" | "session";
   sessionId: string;
   maxFacts: number;
+  maxMessages?: number;
 }
 
 export interface ImportOutput {
   imported_messages: number;
+  total_messages: number;
+  truncated_messages: number;
   transcript_characters: number;
   transcript_session_id: string;
   capture_scope: ScopeRef;
@@ -56,6 +59,7 @@ function helpText(): string {
     "  --scope <type>          One of: project, global, session (default: project)",
     "  --session-id <id>       Session id used when --scope session (default: import-<filename>)",
     "  --max-facts <n>         Max facts extracted by capture (default: 20)",
+    "  --max-messages <n>      Import only the most recent n messages",
     "  -h, --help              Show this help text",
   ].join("\n");
 }
@@ -80,6 +84,7 @@ function parseArgs(argv: string[]): ImportOptions {
   let scopeType: ImportOptions["scopeType"] = "project";
   let sessionId = "";
   let maxFacts = 20;
+  let maxMessages: number | undefined;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -141,6 +146,16 @@ function parseArgs(argv: string[]): ImportOptions {
       continue;
     }
 
+    if (arg === "--max-messages") {
+      const value = argv[i + 1];
+      if (!value) {
+        throw new Error("--max-messages requires a value");
+      }
+      maxMessages = parsePositiveInt(value, "--max-messages");
+      i += 1;
+      continue;
+    }
+
     throw new Error(`Unknown argument: ${arg}`);
   }
 
@@ -154,6 +169,7 @@ function parseArgs(argv: string[]): ImportOptions {
     scopeType,
     sessionId: sessionId || defaultSessionIdFromFile(sessionFile),
     maxFacts,
+    maxMessages,
   };
 }
 
@@ -257,7 +273,11 @@ export async function runImport(options: ImportOptions): Promise<ImportOutput> {
   }
 
   const rawSession = fs.readFileSync(options.sessionFile, "utf8");
-  const messages = extractMessages(rawSession);
+  const allMessages = extractMessages(rawSession);
+  const messages =
+    options.maxMessages && allMessages.length > options.maxMessages
+      ? allMessages.slice(-options.maxMessages)
+      : allMessages;
 
   if (messages.length === 0) {
     throw new Error("No importable user/assistant messages found in session file");
@@ -306,6 +326,8 @@ export async function runImport(options: ImportOptions): Promise<ImportOutput> {
 
     return {
       imported_messages: messages.length,
+      total_messages: allMessages.length,
+      truncated_messages: allMessages.length - messages.length,
       transcript_characters: transcript.length,
       transcript_session_id: options.sessionId,
       capture_scope: scope,

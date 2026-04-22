@@ -53,13 +53,13 @@ const DAILY_HEALTH_PROMPT =
 const IMPORT_SYNC_PROMPT_PREFIX =
   "Run npm run -s automation:import-sync -- --project-path";
 const IMPORT_SYNC_PROMPT_SUFFIX =
-  "Report per source whether Codex and Claude were imported, skipped, missing, or errored, and include session file paths, imported message counts, and captured created and deduped counts.";
+  "--max-session-bytes 1048576 --max-messages 80 --source-timeout-ms 120000. Report per source whether Codex and Claude were imported, skipped, missing, too large, or errored, and include session file paths, imported and total message counts, truncation counts, captured created and deduped counts, and any timeout or size guard.";
 const QA_PROMPT =
   "Run npm run -s automation:retrieval-qa in the repo. Report pass or fail, the assertion results, the top search and context results, and the cleanup deleted count. If it fails, list the failing assertions first.";
 const CLEANUP_PROMPT =
-  "Run npm run -s automation:cleanup -- --dry-run first. If counts.total is 0, report that no cleanup is needed and stop. Otherwise run npm run -s automation:cleanup -- --apply and report deleted counts plus candidate samples for expired and captured_noise. Call out any unexpected canonical or preference-like candidates before applying.";
+  "Run npm run -s automation:cleanup -- --dry-run --sample-limit 10. Report counts, deleted_count, and candidate samples for expired and captured_noise. Do not run --apply from this scheduled automation. If counts.total is nonzero, recommend manual review and an explicit one-off apply command.";
 const MEMORY_DURABILITY_AUDIT_PROMPT =
-  'Run an audit-only Agent Memory durability check. Inspect recently added memories and recent ChatGPT-export synthesis artifacts when available. Classify new rows as durable global preference, durable project memory, ephemeral/noise, currentness-sensitive, sensitive, or transcript/provenance. Upsert only high-confidence durable preferences, facts, and project conventions with the correct scope. Do not delete memories, do not run soft-delete scripts, and do not mutate transcript/provenance rows. Build non-mutating allowlists only when source rows are clearly redundant after synthesis. Open an inbox item titled "Memory durability audit result" with counts reviewed, upserts created, rows intentionally ignored, validation issues, hard-stop concerns, and whether the audit completed without failure.';
+  "Run npm run -s automation:durability-audit -- --recent-hours 48 --recent-limit 250 --synthesis-limit 250. Report completed_without_failure, reviewed counts, classification counts, upserts.created, rows_intentionally_ignored, validation_issues, hard_stop_concerns, and samples. Do not upsert, delete, soft-delete, send email, or create inbox items from this scheduled automation.";
 
 export const CANONICAL_AUTOMATION_NAMES = [
   "Memory health drift",
@@ -203,7 +203,7 @@ export function buildRecommendedAutomationDefinitions(
     {
       id: "memory-import-sync",
       name: "Memory import sync",
-      prompt: `${IMPORT_SYNC_PROMPT_PREFIX} ${resolvedProjectPath}. ${IMPORT_SYNC_PROMPT_SUFFIX}`,
+      prompt: `${IMPORT_SYNC_PROMPT_PREFIX} ${resolvedProjectPath} ${IMPORT_SYNC_PROMPT_SUFFIX}`,
       rrule: "FREQ=HOURLY;INTERVAL=6",
       status: "ACTIVE",
       cwds: [resolvedRepoPath],

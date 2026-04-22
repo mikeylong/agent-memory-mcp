@@ -290,14 +290,16 @@ The bootstrap output is the onboarding source of truth for:
 - workspace cwd
 - whether each automation already exists under `~/.codex/automations`
 
-Recommended prompt-driven automations:
+Recommended automation checks:
 
-- `Memory Durability Audit`: audit-only weekly memory-quality pass. It classifies recent memories, upserts only high-confidence durable preferences/facts/project conventions, preserves transcripts and provenance rows, and does not run deletion or soft-delete scripts.
+- `Memory Durability Audit`: audit-only weekly memory-quality pass. It runs the deterministic durability-audit CLI, classifies recent memories and ChatGPT-export synthesis rows, preserves transcripts and provenance rows, and does not mutate memory or create inbox/email side effects.
+- `Memory cleanup`: scheduled cleanup runs dry-run only and reports candidate counts/samples. Apply cleanup manually after review.
 
 Included automation-oriented CLIs:
 
 - `npm run -s automation:health-drift`
-- `npm run -s automation:import-sync -- --project-path <path>`
+- `npm run -s automation:import-sync -- --project-path <path> [--max-session-bytes <n>] [--max-messages <n>] [--source-timeout-ms <n>]`
+- `npm run -s automation:durability-audit -- [--recent-hours <n>] [--recent-limit <n>] [--synthesis-limit <n>]`
 - `npm run -s automation:retrieval-qa`
 - `npm run -s automation:cleanup -- --dry-run|--apply [--before <iso>]`
 - `npm run -s automation:cleanup -- --apply --expired-only --expired-grace-days 0`

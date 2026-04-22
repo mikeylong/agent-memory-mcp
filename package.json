@@ -53,6 +53,7 @@
     "automation:bootstrap": "tsx src/automationBootstrap.ts",
     "automation:health-drift": "tsx src/automationHealthDrift.ts",
     "automation:import-sync": "tsx src/automationImportSync.ts",
+    "automation:durability-audit": "tsx src/automationDurabilityAudit.ts",
     "automation:retrieval-qa": "tsx src/automationRetrievalQa.ts",
     "automation:cleanup": "tsx src/automationSelectiveCleanup.ts",
     "maintenance:backfill-embeddings": "tsx src/backfillMissingEmbeddings.ts",

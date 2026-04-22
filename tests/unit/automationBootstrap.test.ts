@@ -105,7 +105,7 @@ describe("automation bootstrap recommendations", () => {
         id: "memory-import-sync",
         name: "Memory import sync",
         rrule: "FREQ=HOURLY;INTERVAL=6",
-        prompt: `Run npm run -s automation:import-sync -- --project-path ${projectPath}. Report per source whether Codex and Claude were imported, skipped, missing, or errored, and include session file paths, imported message counts, and captured created and deduped counts.`,
+        prompt: `Run npm run -s automation:import-sync -- --project-path ${projectPath} --max-session-bytes 1048576 --max-messages 80 --source-timeout-ms 120000. Report per source whether Codex and Claude were imported, skipped, missing, too large, or errored, and include session file paths, imported and total message counts, truncation counts, captured created and deduped counts, and any timeout or size guard.`,
         cwds: [repoPath],
         presence: "missing",
       },
@@ -123,7 +123,7 @@ describe("automation bootstrap recommendations", () => {
         name: "Memory cleanup",
         rrule: "FREQ=WEEKLY;BYDAY=SU;BYHOUR=11;BYMINUTE=0",
         prompt:
-          "Run npm run -s automation:cleanup -- --dry-run first. If counts.total is 0, report that no cleanup is needed and stop. Otherwise run npm run -s automation:cleanup -- --apply and report deleted counts plus candidate samples for expired and captured_noise. Call out any unexpected canonical or preference-like candidates before applying.",
+          "Run npm run -s automation:cleanup -- --dry-run --sample-limit 10. Report counts, deleted_count, and candidate samples for expired and captured_noise. Do not run --apply from this scheduled automation. If counts.total is nonzero, recommend manual review and an explicit one-off apply command.",
         cwds: [repoPath],
         presence: "missing",
       },
@@ -132,7 +132,7 @@ describe("automation bootstrap recommendations", () => {
         name: "Memory Durability Audit",
         rrule: "FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=0",
         prompt:
-          'Run an audit-only Agent Memory durability check. Inspect recently added memories and recent ChatGPT-export synthesis artifacts when available. Classify new rows as durable global preference, durable project memory, ephemeral/noise, currentness-sensitive, sensitive, or transcript/provenance. Upsert only high-confidence durable preferences, facts, and project conventions with the correct scope. Do not delete memories, do not run soft-delete scripts, and do not mutate transcript/provenance rows. Build non-mutating allowlists only when source rows are clearly redundant after synthesis. Open an inbox item titled "Memory durability audit result" with counts reviewed, upserts created, rows intentionally ignored, validation issues, hard-stop concerns, and whether the audit completed without failure.',
+          "Run npm run -s automation:durability-audit -- --recent-hours 48 --recent-limit 250 --synthesis-limit 250. Report completed_without_failure, reviewed counts, classification counts, upserts.created, rows_intentionally_ignored, validation_issues, hard_stop_concerns, and samples. Do not upsert, delete, soft-delete, send email, or create inbox items from this scheduled automation.",
         cwds: [repoPath],
         presence: "missing",
       },
