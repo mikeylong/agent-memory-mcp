@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(__dirname, "../..");
 const scriptPath = path.join(repoRoot, "scripts", "install-clients.sh");
+const agentsStartMarker = "<!-- agent-memory-mcp:start -->";
+const agentsEndMarker = "<!-- agent-memory-mcp:end -->";
 
 const cleanupDirs: string[] = [];
 
@@ -65,12 +67,23 @@ function writeAutomationBootstrapFixture(repoPath: string, report: unknown): voi
   );
 }
 
-function runInstaller(args: string[], homeDir: string, repoPath: string, extraEnv: Record<string, string> = {}) {
+function runInstaller(
+  args: string[],
+  homeDir: string,
+  repoPath: string,
+  extraEnv: Record<string, string> = {},
+  input?: string,
+) {
   return spawnSync("bash", [scriptPath, ...args, "--repo-path", repoPath], {
     cwd: repoRoot,
     env: { ...process.env, HOME: homeDir, ...extraEnv },
     encoding: "utf8",
+    input,
   });
+}
+
+function markerCount(content: string, marker: string): number {
+  return content.split(marker).length - 1;
 }
 
 afterEach(() => {
@@ -141,6 +154,197 @@ describe("install-clients.sh", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("Mode: dry-run");
     expect(fs.existsSync(path.join(homeDir, ".codex", "config.toml"))).toBe(false);
+  });
+
+  it("creates a global Codex AGENTS.md policy when requested", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+
+    const result = runInstaller(["--codex", "--agents-mode", "global"], homeDir, repoPath);
+    expect(result.status).toBe(0);
+
+    const agentsPath = path.join(homeDir, ".codex", "AGENTS.md");
+    const content = fs.readFileSync(agentsPath, "utf8");
+    expect(content).toContain(agentsStartMarker);
+    expect(content).toContain(agentsEndMarker);
+    expect(content).toContain("call `memory_get_context`");
+    expect(result.stdout).toContain(`Created Global Codex AGENTS policy at ${agentsPath}`);
+  });
+
+  it("backs up and patches an existing global AGENTS.md policy", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+    const codexDir = path.join(homeDir, ".codex");
+    fs.mkdirSync(codexDir, { recursive: true });
+    const agentsPath = path.join(codexDir, "AGENTS.md");
+    fs.writeFileSync(agentsPath, "# Existing guidance\n\nKeep this line.\n", "utf8");
+
+    const result = runInstaller(["--codex", "--agents-mode", "global"], homeDir, repoPath);
+    expect(result.status).toBe(0);
+
+    const content = fs.readFileSync(agentsPath, "utf8");
+    expect(content).toContain("Keep this line.");
+    expect(markerCount(content, agentsStartMarker)).toBe(1);
+    expect(fs.readdirSync(codexDir).filter((entry) => entry.startsWith("AGENTS.md.bak.")).length).toBe(1);
+    expect(result.stdout).toContain(`Updated Global Codex AGENTS policy at ${agentsPath}`);
+  });
+
+  it("replaces an existing managed AGENTS.md policy without duplication", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+    const codexDir = path.join(homeDir, ".codex");
+    fs.mkdirSync(codexDir, { recursive: true });
+    const agentsPath = path.join(codexDir, "AGENTS.md");
+    fs.writeFileSync(
+      agentsPath,
+      [
+        "# Existing guidance",
+        "",
+        agentsStartMarker,
+        "old policy",
+        agentsEndMarker,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const result = runInstaller(["--codex", "--agents-mode", "global"], homeDir, repoPath);
+    expect(result.status).toBe(0);
+
+    const content = fs.readFileSync(agentsPath, "utf8");
+    expect(content).not.toContain("old policy");
+    expect(content).toContain("call `memory_capture`");
+    expect(markerCount(content, agentsStartMarker)).toBe(1);
+    expect(markerCount(content, agentsEndMarker)).toBe(1);
+  });
+
+  it("skips AGENTS.md policy files with multiple managed blocks and prints the snippet", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+    const codexDir = path.join(homeDir, ".codex");
+    fs.mkdirSync(codexDir, { recursive: true });
+    const agentsPath = path.join(codexDir, "AGENTS.md");
+    const original = [
+      "# Existing guidance",
+      "",
+      agentsStartMarker,
+      "first policy",
+      agentsEndMarker,
+      "",
+      agentsStartMarker,
+      "second policy",
+      agentsEndMarker,
+      "",
+    ].join("\n");
+    fs.writeFileSync(agentsPath, original, "utf8");
+
+    const result = runInstaller(["--codex", "--agents-mode", "global"], homeDir, repoPath);
+    expect(result.status).toBe(0);
+
+    expect(fs.readFileSync(agentsPath, "utf8")).toBe(original);
+    expect(result.stdout).toContain("multiple agent-memory managed blocks found");
+    expect(result.stdout).toContain("AGENTS policy snippet:");
+    expect(fs.readdirSync(codexDir).filter((entry) => entry.startsWith("AGENTS.md.bak.")).length).toBe(0);
+  });
+
+  it("patches AGENTS.override.md instead of AGENTS.md when the override exists", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+    const codexDir = path.join(homeDir, ".codex");
+    fs.mkdirSync(codexDir, { recursive: true });
+    const agentsPath = path.join(codexDir, "AGENTS.md");
+    const overridePath = path.join(codexDir, "AGENTS.override.md");
+    fs.writeFileSync(agentsPath, "# Base guidance\n", "utf8");
+    fs.writeFileSync(overridePath, "# Override guidance\n", "utf8");
+
+    const result = runInstaller(["--codex", "--agents-mode", "global"], homeDir, repoPath);
+    expect(result.status).toBe(0);
+
+    expect(fs.readFileSync(agentsPath, "utf8")).toBe("# Base guidance\n");
+    const overrideContent = fs.readFileSync(overridePath, "utf8");
+    expect(overrideContent).toContain(agentsStartMarker);
+    expect(result.stdout).toContain(`Updated Global Codex AGENTS policy at ${overridePath}`);
+  });
+
+  it("writes a project AGENTS.md policy at --project-path", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+    const projectPath = path.join(homeDir, "workspace");
+    fs.mkdirSync(projectPath, { recursive: true });
+
+    const result = runInstaller(
+      ["--codex", "--agents-mode", "project", "--project-path", projectPath],
+      homeDir,
+      repoPath,
+    );
+    expect(result.status).toBe(0);
+
+    const agentsPath = path.join(projectPath, "AGENTS.md");
+    expect(fs.readFileSync(agentsPath, "utf8")).toContain(agentsStartMarker);
+    expect(result.stdout).toContain(`Created Project AGENTS policy at ${agentsPath}`);
+  });
+
+  it("prints the AGENTS.md policy snippet without writing files", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+
+    const result = runInstaller(["--codex", "--agents-mode", "print"], homeDir, repoPath);
+    expect(result.status).toBe(0);
+
+    expect(result.stdout).toContain("Printed AGENTS policy snippet");
+    expect(result.stdout).toContain(agentsStartMarker);
+    expect(fs.existsSync(path.join(homeDir, ".codex", "AGENTS.md"))).toBe(false);
+  });
+
+  it("does not write AGENTS.md in default ask mode when stdin is non-interactive", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+
+    const result = runInstaller(["--codex"], homeDir, repoPath);
+    expect(result.status).toBe(0);
+
+    expect(result.stdout).toContain("Skipped AGENTS policy prompt because stdin is non-interactive");
+    expect(result.stdout).toContain("scripts/install-clients.sh --codex --agents-mode global");
+    expect(fs.existsSync(path.join(homeDir, ".codex", "AGENTS.md"))).toBe(false);
+  });
+
+  it("selects global AGENTS.md policy when interactive ask receives Enter", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+
+    const result = runInstaller(
+      ["--codex"],
+      homeDir,
+      repoPath,
+      { AGENT_MEMORY_INSTALL_FORCE_INTERACTIVE: "1" },
+      "\n",
+    );
+    expect(result.status).toBe(0);
+
+    const agentsPath = path.join(homeDir, ".codex", "AGENTS.md");
+    expect(result.stdout).toContain("Global Codex AGENTS.md (Recommended)");
+    expect(fs.readFileSync(agentsPath, "utf8")).toContain(agentsStartMarker);
+  });
+
+  it("reports planned AGENTS.md changes in dry-run global mode", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+
+    const result = runInstaller(["--codex", "--agents-mode", "global", "--dry-run"], homeDir, repoPath);
+    expect(result.status).toBe(0);
+
+    expect(result.stdout).toContain("Would create Global Codex AGENTS policy");
+    expect(fs.existsSync(path.join(homeDir, ".codex", "AGENTS.md"))).toBe(false);
+  });
+
+  it("fails cleanly for an invalid AGENTS.md mode", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+
+    const result = runInstaller(["--codex", "--agents-mode", "bogus"], homeDir, repoPath);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("Invalid --agents-mode: bogus");
   });
 
   it("prints recommended automations with missing entries after installation", () => {

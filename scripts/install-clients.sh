@@ -13,6 +13,7 @@ Options:
   --codex                     Configure Codex only
   --xcode                     Configure Xcode only
   --all                       Configure both clients (default)
+  --agents-mode <mode>        Configure AGENTS.md memory policy: ask, global, project, print, or skip (default: ask)
   --agent-memory-home <path>  Set AGENT_MEMORY_HOME (default: $HOME/.agent-memory)
   --project-path <path>       Workspace path to use for recommended automation setup (default: pwd)
   --repo-path <path>          Repo path containing dist/index.js (default: script repo root)
@@ -23,6 +24,7 @@ Options:
 Examples:
   scripts/install-clients.sh
   scripts/install-clients.sh --codex --dry-run
+  scripts/install-clients.sh --codex --agents-mode global
   scripts/install-clients.sh --codex --project-path "$HOME/projects/agent-memory"
   scripts/install-clients.sh --xcode --force
 EOF
@@ -53,6 +55,7 @@ TARGET_CODEX=0
 TARGET_XCODE=0
 DRY_RUN=0
 FORCE=0
+AGENTS_MODE="ask"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -68,6 +71,11 @@ while [[ $# -gt 0 ]]; do
       TARGET_CODEX=1
       TARGET_XCODE=1
       shift
+      ;;
+    --agents-mode)
+      [[ $# -ge 2 ]] || die "--agents-mode requires a value"
+      AGENTS_MODE="$2"
+      shift 2
       ;;
     --agent-memory-home)
       [[ $# -ge 2 ]] || die "--agent-memory-home requires a value"
@@ -102,6 +110,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "$AGENTS_MODE" in
+  ask|global|project|print|skip)
+    ;;
+  *)
+    die "Invalid --agents-mode: $AGENTS_MODE"
+    ;;
+esac
+
 if [[ $TARGET_CODEX -eq 0 && $TARGET_XCODE -eq 0 ]]; then
   TARGET_CODEX=1
   TARGET_XCODE=1
@@ -124,6 +140,10 @@ declare -a CHANGED=()
 declare -a SKIPPED=()
 declare -a FOLLOW_UP=()
 declare -a AUTOMATION_RECOMMENDATIONS=()
+declare -a AGENTS_POLICY=()
+
+AGENTS_START_MARKER="<!-- agent-memory-mcp:start -->"
+AGENTS_END_MARKER="<!-- agent-memory-mcp:end -->"
 
 backup_file() {
   local file_path="$1"
@@ -513,6 +533,321 @@ print_manual_block() {
   done < <(render_toml "$target_command" "$order_style")
 }
 
+render_agents_policy_body() {
+  cat <<'EOF'
+## Agent Memory Policy
+
+Use the `agent-memory` MCP server tools on every conversation turn.
+
+1. Before drafting a response, call `memory_get_context` with the user's latest message as `query`, the current workspace absolute path as `project_path` when available, `max_items: 12`, and `token_budget: 1200` unless the task needs more context.
+2. Use the retrieved memory context when reasoning and responding.
+3. After drafting the response, call `memory_capture` with project scope for the current workspace, raw text that includes the user message and assistant response, a summary hint focused on durable preferences, constraints, decisions, owners, deadlines, paths, and repo facts, and `max_facts: 5`.
+4. For explicit durable facts, call `memory_upsert` in global scope for user-wide preferences or project scope with `metadata.project_path` for repository-specific conventions.
+
+If a memory tool call fails or times out, continue the user task normally and mention the memory failure briefly.
+EOF
+}
+
+render_agents_policy_block() {
+  echo "$AGENTS_START_MARKER"
+  render_agents_policy_body
+  echo "$AGENTS_END_MARKER"
+}
+
+print_agents_policy_snippet() {
+  FOLLOW_UP+=("AGENTS policy snippet:")
+  while IFS= read -r line; do
+    FOLLOW_UP+=("$line")
+  done < <(render_agents_policy_block)
+}
+
+upsert_agents_file() {
+  local target_path="$1"
+  local policy_label="$2"
+  local create_parent="${3:-0}"
+
+  local parent_dir
+  parent_dir="$(dirname "$target_path")"
+
+  local node_output
+  node_output="$(
+    TARGET_PATH="$target_path" \
+    POLICY_BODY="$(render_agents_policy_body)" \
+    POLICY_BLOCK="$(render_agents_policy_block)" \
+    START_MARKER="$AGENTS_START_MARKER" \
+    END_MARKER="$AGENTS_END_MARKER" \
+    node <<'EOF'
+const fs = require("node:fs");
+
+const targetPath = process.env.TARGET_PATH;
+const policyBody = process.env.POLICY_BODY ?? "";
+const policyBlock = process.env.POLICY_BLOCK ?? "";
+const startMarker = process.env.START_MARKER ?? "";
+const endMarker = process.env.END_MARKER ?? "";
+const exists = fs.existsSync(targetPath);
+const content = exists ? fs.readFileSync(targetPath, "utf8") : "";
+
+function countLiteral(input, needle) {
+  if (needle.length === 0) {
+    return 0;
+  }
+
+  let count = 0;
+  let offset = 0;
+  while (true) {
+    const index = input.indexOf(needle, offset);
+    if (index === -1) {
+      return count;
+    }
+    count += 1;
+    offset = index + needle.length;
+  }
+}
+
+function ensureFinalNewline(input) {
+  return input.endsWith("\n") ? input : `${input}\n`;
+}
+
+const startCount = countLiteral(content, startMarker);
+const endCount = countLiteral(content, endMarker);
+
+if (startCount !== endCount) {
+  console.log(
+    JSON.stringify({
+      action: "manual",
+      reason: "unbalanced agent-memory managed block markers found",
+    }),
+  );
+  process.exit(0);
+}
+
+if (startCount > 1) {
+  console.log(
+    JSON.stringify({
+      action: "manual",
+      reason: "multiple agent-memory managed blocks found",
+    }),
+  );
+  process.exit(0);
+}
+
+if (startCount === 0 && content.includes(policyBody)) {
+  console.log(
+    JSON.stringify({
+      action: "unchanged",
+      reason: "the exact unmarked agent-memory policy is already present",
+    }),
+  );
+  process.exit(0);
+}
+
+let finalContent;
+if (startCount === 1) {
+  const startIndex = content.indexOf(startMarker);
+  const endIndex = content.indexOf(endMarker, startIndex);
+
+  if (endIndex === -1 || endIndex < startIndex) {
+    console.log(
+      JSON.stringify({
+        action: "manual",
+        reason: "agent-memory managed block markers are out of order",
+      }),
+    );
+    process.exit(0);
+  }
+
+  const afterEndIndex = endIndex + endMarker.length;
+  finalContent = `${content.slice(0, startIndex)}${policyBlock}${content.slice(afterEndIndex)}`;
+} else if (content.trim().length > 0) {
+  finalContent = `${content.replace(/\s+$/u, "")}\n\n${policyBlock}\n`;
+} else {
+  finalContent = `${policyBlock}\n`;
+}
+
+finalContent = ensureFinalNewline(finalContent);
+const comparableContent = ensureFinalNewline(content);
+
+if (finalContent === comparableContent) {
+  console.log(
+    JSON.stringify({
+      action: "unchanged",
+      reason: "the managed agent-memory policy is current",
+    }),
+  );
+  process.exit(0);
+}
+
+console.log(
+  JSON.stringify({
+    action: exists ? "update" : "create",
+    finalContent,
+  }),
+);
+EOF
+  )"
+
+  local action
+  action="$(printf '%s' "$node_output" | json_field action)"
+
+  if [[ "$action" == "unchanged" ]]; then
+    local reason
+    reason="$(printf '%s' "$node_output" | json_field reason)"
+    AGENTS_POLICY+=("Unchanged $policy_label AGENTS policy at $target_path because $reason")
+    return 0
+  fi
+
+  if [[ "$action" == "manual" ]]; then
+    local reason
+    reason="$(printf '%s' "$node_output" | json_field reason)"
+    if [[ $DRY_RUN -eq 1 ]]; then
+      AGENTS_POLICY+=("Would skip $policy_label AGENTS policy at $target_path because $reason")
+    else
+      AGENTS_POLICY+=("Skipped $policy_label AGENTS policy at $target_path because $reason")
+      print_agents_policy_snippet
+    fi
+    return 0
+  fi
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    if [[ "$action" == "create" ]]; then
+      AGENTS_POLICY+=("Would create $policy_label AGENTS policy at $target_path")
+    else
+      AGENTS_POLICY+=("Would update $policy_label AGENTS policy at $target_path")
+    fi
+    return 0
+  fi
+
+  if [[ "$action" == "update" ]]; then
+    ensure_existing_file_access "$target_path"
+  fi
+
+  if [[ $create_parent -eq 1 ]]; then
+    if ! mkdir -p "$parent_dir"; then
+      die "Failed to create AGENTS policy directory $parent_dir"
+    fi
+    ensure_parent_writable "$parent_dir"
+  elif [[ ! -d "$parent_dir" ]]; then
+    die "AGENTS policy directory does not exist: $parent_dir"
+  else
+    ensure_parent_writable "$parent_dir"
+  fi
+
+  if [[ "$action" == "update" ]]; then
+    backup_file "$target_path"
+  fi
+
+  local final_content
+  final_content="$(printf '%s' "$node_output" | json_field finalContent)"
+  write_atomic_file "$target_path" "$final_content"
+
+  if [[ "$action" == "create" ]]; then
+    AGENTS_POLICY+=("Created $policy_label AGENTS policy at $target_path")
+  else
+    AGENTS_POLICY+=("Updated $policy_label AGENTS policy at $target_path")
+  fi
+}
+
+install_agents_global() {
+  local codex_dir="${HOME}/.codex"
+  local target_path="${codex_dir}/AGENTS.md"
+
+  if [[ -e "${codex_dir}/AGENTS.override.md" ]]; then
+    target_path="${codex_dir}/AGENTS.override.md"
+  fi
+
+  upsert_agents_file "$target_path" "Global Codex" 1
+}
+
+install_agents_project() {
+  upsert_agents_file "${AUTOMATION_PROJECT_PATH}/AGENTS.md" "Project" 0
+}
+
+install_agents_mode() {
+  local mode="$1"
+
+  case "$mode" in
+    global)
+      install_agents_global
+      ;;
+    project)
+      install_agents_project
+      ;;
+    print)
+      if [[ $DRY_RUN -eq 1 ]]; then
+        AGENTS_POLICY+=("Would print AGENTS policy snippet")
+      else
+        AGENTS_POLICY+=("Printed AGENTS policy snippet")
+        print_agents_policy_snippet
+      fi
+      ;;
+    skip)
+      if [[ $DRY_RUN -eq 1 ]]; then
+        AGENTS_POLICY+=("Would skip AGENTS policy installation")
+      else
+        AGENTS_POLICY+=("Skipped AGENTS policy installation")
+      fi
+      ;;
+    *)
+      die "Invalid AGENTS policy mode: $mode"
+      ;;
+  esac
+}
+
+installer_is_interactive() {
+  if [[ "${AGENT_MEMORY_INSTALL_FORCE_INTERACTIVE:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  [[ -t 0 && -t 1 ]]
+}
+
+configure_agents_policy() {
+  if [[ "$AGENTS_MODE" != "ask" ]]; then
+    install_agents_mode "$AGENTS_MODE"
+    return 0
+  fi
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    AGENTS_POLICY+=("Would ask how to configure AGENTS policy")
+    return 0
+  fi
+
+  if ! installer_is_interactive; then
+    AGENTS_POLICY+=("Skipped AGENTS policy prompt because stdin is non-interactive")
+    FOLLOW_UP+=("Recommended command: scripts/install-clients.sh --codex --agents-mode global")
+    return 0
+  fi
+
+  echo
+  echo "Configure AGENTS.md memory policy?"
+  echo "1. Global Codex AGENTS.md (Recommended)"
+  echo "2. Project AGENTS.md at $AUTOMATION_PROJECT_PATH"
+  echo "3. Print snippet only"
+  echo "4. Skip"
+  printf "Select an option [1]: "
+
+  local choice
+  IFS= read -r choice || choice=""
+
+  case "$choice" in
+    ""|1)
+      install_agents_mode "global"
+      ;;
+    2)
+      install_agents_mode "project"
+      ;;
+    3)
+      install_agents_mode "print"
+      ;;
+    4)
+      install_agents_mode "skip"
+      ;;
+    *)
+      die "Invalid AGENTS policy menu choice: $choice"
+      ;;
+  esac
+}
+
 install_codex() {
   local config_path="${HOME}/.codex/config.toml"
   upsert_toml_file "$config_path" "Codex" 1 "node" "args-first"
@@ -625,6 +960,16 @@ print_summary() {
   fi
 
   echo
+  echo "AGENTS policy:"
+  if [[ ${#AGENTS_POLICY[@]} -eq 0 ]]; then
+    echo "- none"
+  else
+    for item in "${AGENTS_POLICY[@]}"; do
+      echo "- $item"
+    done
+  fi
+
+  echo
   echo "Follow-up:"
   if [[ ${#FOLLOW_UP[@]} -eq 0 ]]; then
     echo "- none"
@@ -652,6 +997,8 @@ fi
 if [[ $TARGET_XCODE -eq 1 ]]; then
   install_xcode
 fi
+
+configure_agents_policy
 
 collect_automation_recommendations
 
