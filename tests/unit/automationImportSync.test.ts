@@ -8,12 +8,17 @@ const originalEnv = {
   AGENT_MEMORY_HOME: process.env.AGENT_MEMORY_HOME,
   AGENT_MEMORY_DB_PATH: process.env.AGENT_MEMORY_DB_PATH,
   AGENT_MEMORY_DISABLE_EMBEDDINGS: process.env.AGENT_MEMORY_DISABLE_EMBEDDINGS,
+  AGENT_MEMORY_SKIP_TOOL_ASSISTED: process.env.AGENT_MEMORY_SKIP_TOOL_ASSISTED,
 };
 
 afterEach(() => {
-  process.env.AGENT_MEMORY_HOME = originalEnv.AGENT_MEMORY_HOME;
-  process.env.AGENT_MEMORY_DB_PATH = originalEnv.AGENT_MEMORY_DB_PATH;
-  process.env.AGENT_MEMORY_DISABLE_EMBEDDINGS = originalEnv.AGENT_MEMORY_DISABLE_EMBEDDINGS;
+  for (const [key, value] of Object.entries(originalEnv)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
 });
 
 async function writeCodexSession(filePath: string): Promise<void> {
@@ -21,6 +26,39 @@ async function writeCodexSession(filePath: string): Promise<void> {
     "Use pnpm in this repo.",
     "Recorded.",
   ]);
+}
+
+async function writeCodexToolAssistedSession(filePath: string): Promise<void> {
+  const lines = [
+    JSON.stringify({
+      timestamp: "2026-03-12T10:00:00.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Use pnpm in this repo." }],
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-03-12T10:00:01.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "exec_command",
+        call_id: "tool-1",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-03-12T10:00:02.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Recorded." }],
+      },
+    }),
+  ];
+  await fs.writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
 }
 
 async function writeCodexSessionTexts(filePath: string, texts: string[]): Promise<void> {
@@ -82,6 +120,7 @@ describe("automation import sync", () => {
     process.env.AGENT_MEMORY_HOME = memoryHome;
     process.env.AGENT_MEMORY_DB_PATH = path.join(memoryHome, "memory.db");
     process.env.AGENT_MEMORY_DISABLE_EMBEDDINGS = "1";
+    process.env.AGENT_MEMORY_SKIP_TOOL_ASSISTED = "1";
 
     try {
       const first = await runImportSync({
@@ -133,6 +172,7 @@ describe("automation import sync", () => {
     process.env.AGENT_MEMORY_HOME = memoryHome;
     process.env.AGENT_MEMORY_DB_PATH = path.join(memoryHome, "memory.db");
     process.env.AGENT_MEMORY_DISABLE_EMBEDDINGS = "1";
+    process.env.AGENT_MEMORY_SKIP_TOOL_ASSISTED = "1";
 
     try {
       const report = await runImportSync({
@@ -191,6 +231,48 @@ describe("automation import sync", () => {
         expect(report.results.codex.imported_messages).toBe(2);
         expect(report.results.codex.total_messages).toBe(4);
         expect(report.results.codex.truncated_messages).toBe(2);
+      }
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports imported transcripts with skipped fact capture for tool-assisted sessions", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-memory-import-sync-"));
+    const codexRoot = path.join(tempDir, "codex");
+    const claudeRoot = path.join(tempDir, "claude");
+    const projectPath = path.join(tempDir, "project");
+    const stateFile = path.join(tempDir, "import-sync-state.json");
+    const memoryHome = path.join(tempDir, "memory-home");
+
+    await fs.mkdir(path.join(codexRoot, "2026", "03", "12"), { recursive: true });
+    await fs.mkdir(projectPath, { recursive: true });
+    await writeCodexToolAssistedSession(
+      path.join(codexRoot, "2026", "03", "12", "rollout-tool.jsonl"),
+    );
+
+    process.env.AGENT_MEMORY_HOME = memoryHome;
+    process.env.AGENT_MEMORY_DB_PATH = path.join(memoryHome, "memory.db");
+    process.env.AGENT_MEMORY_DISABLE_EMBEDDINGS = "1";
+    process.env.AGENT_MEMORY_SKIP_TOOL_ASSISTED = "1";
+
+    try {
+      const report = await runImportSync({
+        projectPath,
+        maxFacts: 5,
+        codexRoot,
+        claudeRoot,
+        stateFile,
+      });
+
+      expect(report.ok).toBe(true);
+      expect(report.results.codex.status).toBe("imported");
+      if (report.results.codex.status === "imported") {
+        expect(report.results.codex.transcript_created).toBe(true);
+        expect(report.results.codex.capture_skipped).toBe(true);
+        expect(report.results.codex.captured_created).toBe(0);
+        expect(report.results.codex.captured_deduped).toBe(0);
+        expect(report.results.codex.tool_assistance.assisted).toBe(true);
       }
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });

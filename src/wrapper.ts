@@ -9,6 +9,15 @@ import { MemoryDb } from "./db/client.js";
 import { DisabledEmbeddingsProvider, EmbeddingsProvider } from "./embeddings/provider.js";
 import { OllamaEmbeddingsProvider } from "./embeddings/ollama.js";
 import { MemoryService, type MemoryHealthStatus } from "./memoryService.js";
+import {
+  TOOL_ASSISTED_CAPTURE_SKIP_REASON,
+  defaultSkipToolAssisted,
+  findLatestSessionFileForProject,
+  readToolAssistanceFromFile,
+  type ToolAssistanceSource,
+} from "./toolAssistance.js";
+
+type WrapperAgentMode = ToolAssistanceSource;
 
 export interface WrapperOptions {
   projectPath: string;
@@ -16,6 +25,8 @@ export interface WrapperOptions {
   maxItems: number;
   tokenBudget: number;
   modelCommand?: string;
+  agentMode?: WrapperAgentMode;
+  skipToolAssisted: boolean;
   debug: boolean;
   helpRequested?: boolean;
 }
@@ -43,6 +54,8 @@ export function parseWrapperArgs(argv: string[], cwd = process.cwd()): WrapperOp
   let maxItems = 12;
   let tokenBudget = 1200;
   let modelCommand: string | undefined;
+  let agentMode: WrapperAgentMode | undefined;
+  let skipToolAssisted = defaultSkipToolAssisted();
   let debug = false;
   let codexMode = false;
   let claudeMode = false;
@@ -115,6 +128,16 @@ export function parseWrapperArgs(argv: string[], cwd = process.cwd()): WrapperOp
       continue;
     }
 
+    if (arg === "--skip-tool-assisted") {
+      skipToolAssisted = true;
+      continue;
+    }
+
+    if (arg === "--no-skip-tool-assisted") {
+      skipToolAssisted = false;
+      continue;
+    }
+
     if (arg === "--help" || arg === "-h") {
       return {
         projectPath,
@@ -122,6 +145,8 @@ export function parseWrapperArgs(argv: string[], cwd = process.cwd()): WrapperOp
         maxItems,
         tokenBudget,
         modelCommand,
+        agentMode,
+        skipToolAssisted,
         debug,
         helpRequested: true,
       };
@@ -137,8 +162,10 @@ export function parseWrapperArgs(argv: string[], cwd = process.cwd()): WrapperOp
   let shortcutModelCommand: string | undefined;
   if (codexMode) {
     shortcutModelCommand = `codex exec - --color never --skip-git-repo-check -C ${shellQuote(projectPath)}`;
+    agentMode = "codex";
   } else if (claudeMode) {
     shortcutModelCommand = "claude -p";
+    agentMode = "claude";
   }
 
   return {
@@ -147,6 +174,8 @@ export function parseWrapperArgs(argv: string[], cwd = process.cwd()): WrapperOp
     maxItems,
     tokenBudget,
     modelCommand: modelCommand ?? shortcutModelCommand,
+    agentMode,
+    skipToolAssisted,
     debug,
   };
 }
@@ -257,6 +286,8 @@ function helpText(): string {
     "  --model-command <cmd>   Command to execute with wrapped prompt on stdin",
     "  --codex                 Shortcut for: codex exec - --color never --skip-git-repo-check -C <project-path>",
     "  --claude                Shortcut for: claude -p",
+    "  --skip-tool-assisted    Skip extracted facts when non-memory tools/web were used (default)",
+    "  --no-skip-tool-assisted Capture extracted facts even when tools/web were used",
     "  --debug                 Print memory read/write operations for each turn",
     "  -h, --help              Show this help text",
     "",
@@ -279,8 +310,29 @@ async function persistTurn(
   options: WrapperOptions,
   userPrompt: string,
   assistantResponse: string,
-): Promise<void> {
+  turnStartedAtMs: number,
+): Promise<{ captureSkipped: boolean }> {
   const transcript = `User: ${userPrompt}\nAssistant: ${assistantResponse}`;
+  const telemetryFile =
+    options.skipToolAssisted && options.agentMode
+      ? findLatestSessionFileForProject({
+          source: options.agentMode,
+          projectPath: options.projectPath,
+          sinceMs: turnStartedAtMs,
+        })
+      : null;
+  const toolAssistance =
+    options.skipToolAssisted && options.agentMode
+      ? readToolAssistanceFromFile(options.agentMode, telemetryFile ?? undefined)
+      : null;
+  const captureSkipped = toolAssistance?.assisted === true;
+  const tags = captureSkipped ? ["turn-log", "tool-assisted"] : ["turn-log"];
+
+  if (options.debug && options.skipToolAssisted && options.agentMode && !telemetryFile) {
+    output.write(
+      `[debug] tool-assisted telemetry unavailable for ${options.agentMode}; capture remains enabled for this turn\n`,
+    );
+  }
 
   if (options.debug) {
     output.write(
@@ -292,13 +344,19 @@ async function persistTurn(
     scope: { type: "session", id: options.sessionId },
     content: transcript,
     importance: 0.35,
-    tags: ["turn-log"],
+    tags,
     ttl_days: 14,
     metadata: {
       project_path: options.projectPath,
       source_agent: "memory-wrapper",
       session_id: options.sessionId,
       role: "dialog_turn",
+      telemetry_file: telemetryFile ?? undefined,
+      capture_skipped: captureSkipped,
+      capture_skip_reason: captureSkipped
+        ? TOOL_ASSISTED_CAPTURE_SKIP_REASON
+        : undefined,
+      tool_assistance: toolAssistance ?? undefined,
     },
   });
 
@@ -306,9 +364,19 @@ async function persistTurn(
     output.write(
       `[debug] memory.upsert result id=${upsertResult.id} created=${upsertResult.created}\n`,
     );
+    if (captureSkipped) {
+      output.write(
+        `[debug] memory.capture skipped reason=${TOOL_ASSISTED_CAPTURE_SKIP_REASON} telemetry_file=${telemetryFile ?? "(unknown)"}\n`,
+      );
+      return { captureSkipped };
+    }
     output.write(
       `[debug] memory.capture scope=project id=${options.projectPath} max_facts=5 tags=captured\n`,
     );
+  }
+
+  if (captureSkipped) {
+    return { captureSkipped };
   }
 
   const captureResult = await memory.capture({
@@ -325,6 +393,8 @@ async function persistTurn(
       `[debug] memory.capture result extracted=${captureResult.extracted_count} created=${captureResult.created_ids.length} deduped=${captureResult.deduped_ids.length}\n`,
     );
   }
+
+  return { captureSkipped };
 }
 
 export async function startWrapper(rawArgv = process.argv.slice(2)): Promise<void> {
@@ -387,6 +457,8 @@ export async function startWrapper(rawArgv = process.argv.slice(2)): Promise<voi
         continue;
       }
 
+      const turnStartedAtMs = Date.now();
+
       if (userPrompt === "/exit" || userPrompt === "/quit") {
         break;
       }
@@ -432,8 +504,18 @@ export async function startWrapper(rawArgv = process.argv.slice(2)): Promise<voi
         continue;
       }
 
-      await persistTurn(memory, options, userPrompt, assistantResponse);
-      output.write("Saved turn to memory (session + captured project facts).\n\n");
+      const persistResult = await persistTurn(
+        memory,
+        options,
+        userPrompt,
+        assistantResponse,
+        turnStartedAtMs,
+      );
+      output.write(
+        persistResult.captureSkipped
+          ? "Saved turn transcript to memory (project fact capture skipped: tool-assisted).\n\n"
+          : "Saved turn to memory (session + captured project facts).\n\n",
+      );
     }
   } finally {
     rl.close();

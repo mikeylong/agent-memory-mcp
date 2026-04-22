@@ -199,6 +199,80 @@ describe("handleStop", () => {
     expect(stateStore.read("session-save")).toBeNull();
   });
 
+  it("skips fact capture but keeps turn provenance when transcript used non-memory tools", async () => {
+    const dir = tempDir();
+    cleanupDirs.push(dir);
+    const stateStore = new FileTurnStateStore(dir);
+    const { memory, calls } = createMemoryStub();
+    const transcriptPath = path.join(dir, "tool-assisted.jsonl");
+    fs.writeFileSync(
+      transcriptPath,
+      [
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "tool-1", name: "WebSearch" }],
+          },
+        }),
+      ].join("\n"),
+      "utf8",
+    );
+
+    stateStore.write("session-tool", {
+      prompt: "What changed recently?",
+      is_slash_command: false,
+      project_path: "/tmp/repo",
+      transcript_path: transcriptPath,
+      updated_at: new Date().toISOString(),
+    });
+
+    await handleStop(
+      {
+        hook_event_name: "Stop",
+        session_id: "session-tool",
+        cwd: "/tmp/repo",
+        last_assistant_message: "Here is the answer.",
+      },
+      memory,
+      stateStore,
+    );
+
+    expect(calls.upsert).toBe(1);
+    expect(calls.capture).toBe(0);
+    expect(stateStore.read("session-tool")).toBeNull();
+  });
+
+  it("captures normally when transcript telemetry is unavailable", async () => {
+    const dir = tempDir();
+    cleanupDirs.push(dir);
+    const stateStore = new FileTurnStateStore(dir);
+    const { memory, calls } = createMemoryStub();
+
+    stateStore.write("session-missing-telemetry", {
+      prompt: "What is my preference?",
+      is_slash_command: false,
+      project_path: "/tmp/repo",
+      transcript_path: path.join(dir, "missing.jsonl"),
+      updated_at: new Date().toISOString(),
+    });
+
+    await handleStop(
+      {
+        hook_event_name: "Stop",
+        session_id: "session-missing-telemetry",
+        cwd: "/tmp/repo",
+        last_assistant_message: "Your preference is cedar green.",
+      },
+      memory,
+      stateStore,
+    );
+
+    expect(calls.upsert).toBe(1);
+    expect(calls.capture).toBe(1);
+    expect(stateStore.read("session-missing-telemetry")).toBeNull();
+  });
+
   it("skips persistence for slash prompts and clears state", async () => {
     const dir = tempDir();
     cleanupDirs.push(dir);

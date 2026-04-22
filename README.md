@@ -225,6 +225,10 @@ Importer flags for Codex and Claude session scripts:
 - `--scope <project|global|session>` default `project`
 - `--session-id <id>` only when `--scope session`
 - `--max-facts <n>` default `25`
+- `--skip-tool-assisted` default; stores transcript provenance but skips extracted facts when non-memory tools or web search were used
+- `--no-skip-tool-assisted` opt out and capture facts even from tool-assisted sessions
+
+Set `AGENT_MEMORY_SKIP_TOOL_ASSISTED=0` to make the opt-out the default for importer, import-sync, wrapper, and hook flows.
 
 ## Retrieval Behavior
 

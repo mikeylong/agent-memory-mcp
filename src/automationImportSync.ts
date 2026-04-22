@@ -20,6 +20,7 @@ import {
   runImport as runCodexImport,
   type ImportOutput as CodexImportOutput,
 } from "./importCodexSession.js";
+import { ToolAssistanceSummary, defaultSkipToolAssisted } from "./toolAssistance.js";
 
 type ImportSyncSource = "codex" | "claude";
 
@@ -47,6 +48,7 @@ interface ImportSyncOptions {
   maxFacts: number;
   maxMessages?: number;
   maxSessionBytes?: number;
+  skipToolAssisted?: boolean;
   codexRoot: string;
   claudeRoot: string;
   stateFile?: string;
@@ -67,6 +69,9 @@ interface ImportedSourceResult {
   transcript_created: boolean;
   captured_created: number;
   captured_deduped: number;
+  capture_skipped: boolean;
+  capture_skip_reason?: string;
+  tool_assistance: ToolAssistanceSummary;
 }
 
 interface SkippedSourceResult {
@@ -119,6 +124,8 @@ function helpText(): string {
     `  --max-messages <n>      Import only the newest n messages per source (default: ${DEFAULT_MAX_MESSAGES})`,
     `  --max-session-bytes <n> Skip a new session file above n bytes (default: ${DEFAULT_MAX_SESSION_BYTES})`,
     `  --source-timeout-ms <n> Max total CLI runtime budget per source before process exit (default: ${DEFAULT_SOURCE_TIMEOUT_MS})`,
+    "  --skip-tool-assisted    Skip extracted facts when non-memory tools/web were used (default)",
+    "  --no-skip-tool-assisted Capture extracted facts even when tools/web were used",
     "  --codex-root <path>     Codex session root (default: ~/.codex/sessions)",
     "  --claude-root <path>    Claude session root (default: ~/.claude/projects)",
     "  --state-file <path>     Override the import sync state file",
@@ -131,6 +138,7 @@ function parseArgs(argv: string[]): ImportSyncCliOptions {
   let maxFacts = 25;
   let maxMessages = DEFAULT_MAX_MESSAGES;
   let maxSessionBytes = DEFAULT_MAX_SESSION_BYTES;
+  let skipToolAssisted = defaultSkipToolAssisted();
   let sourceTimeoutMs = DEFAULT_SOURCE_TIMEOUT_MS;
   let codexRoot = path.join(process.env.HOME ?? "~", ".codex", "sessions");
   let claudeRoot = path.join(process.env.HOME ?? "~", ".claude", "projects");
@@ -193,6 +201,16 @@ function parseArgs(argv: string[]): ImportSyncCliOptions {
       continue;
     }
 
+    if (arg === "--skip-tool-assisted") {
+      skipToolAssisted = true;
+      continue;
+    }
+
+    if (arg === "--no-skip-tool-assisted") {
+      skipToolAssisted = false;
+      continue;
+    }
+
     if (arg === "--codex-root") {
       const value = argv[i + 1];
       if (!value) {
@@ -231,6 +249,7 @@ function parseArgs(argv: string[]): ImportSyncCliOptions {
     maxFacts,
     maxMessages,
     maxSessionBytes,
+    skipToolAssisted,
     sourceTimeoutMs,
     codexRoot,
     claudeRoot,
@@ -252,6 +271,9 @@ function toImportedResult(
     transcript_created: output.upsert.created,
     captured_created: output.capture.created_ids.length,
     captured_deduped: output.capture.deduped_ids.length,
+    capture_skipped: output.capture_skipped,
+    capture_skip_reason: output.capture_skip_reason,
+    tool_assistance: output.tool_assistance,
   };
 }
 
@@ -325,6 +347,7 @@ async function syncSource(
             sessionId: defaultCodexSessionIdFromFile(latest.path),
             maxFacts: options.maxFacts,
             maxMessages,
+            skipToolAssisted: options.skipToolAssisted,
           })
         : await runClaudeImport({
             sessionFile: latest.path,
@@ -333,9 +356,10 @@ async function syncSource(
             sessionId: defaultClaudeSessionIdFromFile(latest.path),
             maxFacts: options.maxFacts,
             maxMessages,
+            skipToolAssisted: options.skipToolAssisted,
           });
     options.progress?.(
-      `import-sync: ${source} imported ${output.imported_messages}/${output.total_messages} messages`,
+      `import-sync: ${source} imported ${output.imported_messages}/${output.total_messages} messages${output.capture_skipped ? " (capture skipped: tool-assisted)" : ""}`,
     );
 
     return {
@@ -366,6 +390,7 @@ export async function runImportSync(
     ...options,
     maxMessages: options.maxMessages ?? DEFAULT_MAX_MESSAGES,
     maxSessionBytes: options.maxSessionBytes ?? DEFAULT_MAX_SESSION_BYTES,
+    skipToolAssisted: options.skipToolAssisted ?? defaultSkipToolAssisted(),
   };
   const config = loadConfig();
   const stateDir = ensureAutomationStateDir(config.dataDir);

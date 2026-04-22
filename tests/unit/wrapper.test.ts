@@ -1,9 +1,19 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   composeEmbeddingsStartupNotice,
   composeWrappedPrompt,
   parseWrapperArgs,
 } from "../../src/wrapper.js";
+
+const originalSkipToolAssisted = process.env.AGENT_MEMORY_SKIP_TOOL_ASSISTED;
+
+afterEach(() => {
+  if (originalSkipToolAssisted === undefined) {
+    delete process.env.AGENT_MEMORY_SKIP_TOOL_ASSISTED;
+  } else {
+    process.env.AGENT_MEMORY_SKIP_TOOL_ASSISTED = originalSkipToolAssisted;
+  }
+});
 
 describe("wrapper args", () => {
   it("parses defaults", () => {
@@ -12,6 +22,7 @@ describe("wrapper args", () => {
     expect(parsed.projectPath).toBe("/tmp/my-project");
     expect(parsed.maxItems).toBe(12);
     expect(parsed.tokenBudget).toBe(1200);
+    expect(parsed.skipToolAssisted).toBe(true);
     expect(parsed.debug).toBe(false);
     expect(parsed.sessionId.startsWith("session-")).toBe(true);
   });
@@ -36,6 +47,7 @@ describe("wrapper args", () => {
     expect(parsed.maxItems).toBe(8);
     expect(parsed.tokenBudget).toBe(900);
     expect(parsed.modelCommand).toBe("cat");
+    expect(parsed.skipToolAssisted).toBe(true);
     expect(parsed.debug).toBe(true);
   });
 
@@ -47,6 +59,7 @@ describe("wrapper args", () => {
     ]);
 
     expect(parsed.modelCommand).toContain("codex exec -");
+    expect(parsed.agentMode).toBe("codex");
     expect(parsed.modelCommand).toContain("--skip-git-repo-check");
     expect(parsed.modelCommand).toContain("-C");
     expect(parsed.modelCommand).toContain("/tmp/repo-with spaces");
@@ -56,12 +69,23 @@ describe("wrapper args", () => {
     const parsed = parseWrapperArgs(["--claude"]);
 
     expect(parsed.modelCommand).toBe("claude -p");
+    expect(parsed.agentMode).toBe("claude");
   });
 
   it("rejects enabling both --codex and --claude", () => {
     expect(() => parseWrapperArgs(["--codex", "--claude"])).toThrow(
       "--codex and --claude cannot be used together",
     );
+  });
+
+  it("parses explicit tool-assisted skip flags", () => {
+    expect(parseWrapperArgs(["--skip-tool-assisted"]).skipToolAssisted).toBe(true);
+    expect(parseWrapperArgs(["--no-skip-tool-assisted"]).skipToolAssisted).toBe(false);
+  });
+
+  it("uses AGENT_MEMORY_SKIP_TOOL_ASSISTED=0 as the default opt-out", () => {
+    process.env.AGENT_MEMORY_SKIP_TOOL_ASSISTED = "0";
+    expect(parseWrapperArgs([]).skipToolAssisted).toBe(false);
   });
 });
 

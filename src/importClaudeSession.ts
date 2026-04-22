@@ -10,6 +10,13 @@ import {
 } from "./embeddings/provider.js";
 import { OllamaEmbeddingsProvider } from "./embeddings/ollama.js";
 import { MemoryService } from "./memoryService.js";
+import {
+  TOOL_ASSISTED_CAPTURE_SKIP_REASON,
+  ToolAssistanceSummary,
+  defaultSkipToolAssisted,
+  detectClaudeToolAssistance,
+  emptyCaptureResult,
+} from "./toolAssistance.js";
 import { ScopeRef } from "./types.js";
 
 export interface ImportOptions {
@@ -19,6 +26,7 @@ export interface ImportOptions {
   sessionId: string;
   maxFacts: number;
   maxMessages?: number;
+  skipToolAssisted?: boolean;
 }
 
 export interface ImportOutput {
@@ -30,6 +38,9 @@ export interface ImportOutput {
   capture_scope: ScopeRef;
   upsert: Awaited<ReturnType<MemoryService["upsert"]>>;
   capture: Awaited<ReturnType<MemoryService["capture"]>>;
+  capture_skipped: boolean;
+  capture_skip_reason?: string;
+  tool_assistance: ToolAssistanceSummary;
 }
 
 interface SessionMessage {
@@ -63,6 +74,8 @@ function helpText(): string {
     "  --session-id <id>       Session id used when --scope session (default: import-<filename>)",
     "  --max-facts <n>         Max facts extracted by capture (default: 20)",
     "  --max-messages <n>      Import only the most recent n messages",
+    "  --skip-tool-assisted    Skip extracted facts when non-memory tools/web were used (default)",
+    "  --no-skip-tool-assisted Capture extracted facts even when tools/web were used",
     "  -h, --help              Show this help text",
   ].join("\n");
 }
@@ -88,6 +101,7 @@ function parseArgs(argv: string[]): ImportOptions {
   let sessionId = "";
   let maxFacts = 20;
   let maxMessages: number | undefined;
+  let skipToolAssisted = defaultSkipToolAssisted();
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -159,6 +173,16 @@ function parseArgs(argv: string[]): ImportOptions {
       continue;
     }
 
+    if (arg === "--skip-tool-assisted") {
+      skipToolAssisted = true;
+      continue;
+    }
+
+    if (arg === "--no-skip-tool-assisted") {
+      skipToolAssisted = false;
+      continue;
+    }
+
     throw new Error(`Unknown argument: ${arg}`);
   }
 
@@ -173,6 +197,7 @@ function parseArgs(argv: string[]): ImportOptions {
     sessionId: sessionId || defaultSessionIdFromFile(sessionFile),
     maxFacts,
     maxMessages,
+    skipToolAssisted,
   };
 }
 
@@ -283,6 +308,9 @@ export async function runImport(options: ImportOptions): Promise<ImportOutput> {
   }
 
   const rawSession = fs.readFileSync(options.sessionFile, "utf8");
+  const toolAssistance = detectClaudeToolAssistance(rawSession);
+  const skipToolAssisted = options.skipToolAssisted ?? defaultSkipToolAssisted();
+  const captureSkipped = skipToolAssisted && toolAssistance.assisted;
   const allMessages = extractMessages(rawSession);
   const messages =
     options.maxMessages && allMessages.length > options.maxMessages
@@ -309,30 +337,42 @@ export async function runImport(options: ImportOptions): Promise<ImportOutput> {
   const memory = new MemoryService(db, embeddings, `${config.version}-import`);
 
   try {
+    const transcriptTags = ["import", "claude-session", "transcript"];
+    if (captureSkipped) {
+      transcriptTags.push("tool-assisted");
+    }
+
     const upsertResult = await memory.upsert({
       scope: {
         type: "session",
         id: options.sessionId,
       },
       content: `Imported Claude Code session transcript from ${options.sessionFile}\n\n${transcript}`,
-      tags: ["import", "claude-session", "transcript"],
+      tags: transcriptTags,
       importance: 0.6,
       ttl_days: 30,
       metadata: {
         source_agent: "claude-session-import",
         source_session_file: options.sessionFile,
         project_path: options.projectPath,
+        capture_skipped: captureSkipped,
+        capture_skip_reason: captureSkipped
+          ? TOOL_ASSISTED_CAPTURE_SKIP_REASON
+          : undefined,
+        tool_assistance: toolAssistance,
       },
     });
 
-    const captureResult = await memory.capture({
-      scope,
-      raw_text: transcript,
-      summary_hint:
-        "Extract durable preferences, constraints, conventions, owners, deadlines, paths, and important facts from this imported Claude Code session.",
-      tags: ["import", "claude-session", "captured"],
-      max_facts: Math.min(100, options.maxFacts),
-    });
+    const captureResult = captureSkipped
+      ? emptyCaptureResult()
+      : await memory.capture({
+          scope,
+          raw_text: transcript,
+          summary_hint:
+            "Extract durable preferences, constraints, conventions, owners, deadlines, paths, and important facts from this imported Claude Code session.",
+          tags: ["import", "claude-session", "captured"],
+          max_facts: Math.min(100, options.maxFacts),
+        });
 
     return {
       imported_messages: messages.length,
@@ -343,6 +383,11 @@ export async function runImport(options: ImportOptions): Promise<ImportOutput> {
       capture_scope: scope,
       upsert: upsertResult,
       capture: captureResult,
+      capture_skipped: captureSkipped,
+      capture_skip_reason: captureSkipped
+        ? TOOL_ASSISTED_CAPTURE_SKIP_REASON
+        : undefined,
+      tool_assistance: toolAssistance,
     };
   } finally {
     db.close();

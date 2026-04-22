@@ -17,6 +17,8 @@ Options:
   --scope <type>          One of: project, global, session (default: project)
   --session-id <id>       Session id when --scope session (optional)
   --max-facts <n>         Max facts captured (default: 25)
+  --skip-tool-assisted    Skip extracted facts when non-memory tools/web were used (default)
+  --no-skip-tool-assisted Capture extracted facts even when tools/web were used
   -h, --help              Show this help text
 
 Examples:
@@ -53,6 +55,7 @@ PROJECT_PATH="$(pwd)"
 SCOPE="project"
 SESSION_ID=""
 MAX_FACTS="25"
+SKIP_TOOL_ASSISTED_FLAG=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -80,6 +83,14 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { echo "Error: --max-facts requires a value." >&2; exit 1; }
       MAX_FACTS="$2"
       shift 2
+      ;;
+    --skip-tool-assisted)
+      SKIP_TOOL_ASSISTED_FLAG="--skip-tool-assisted"
+      shift
+      ;;
+    --no-skip-tool-assisted)
+      SKIP_TOOL_ASSISTED_FLAG="--no-skip-tool-assisted"
+      shift
       ;;
     -h|--help)
       print_help
@@ -136,6 +147,10 @@ cmd=(
 
 if [[ "$SCOPE" == "session" && -n "$SESSION_ID" ]]; then
   cmd+=(--session-id "$SESSION_ID")
+fi
+
+if [[ -n "$SKIP_TOOL_ASSISTED_FLAG" ]]; then
+  cmd+=("$SKIP_TOOL_ASSISTED_FLAG")
 fi
 
 cd "$ROOT_DIR"

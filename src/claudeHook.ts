@@ -8,6 +8,11 @@ import { MemoryDb } from "./db/client.js";
 import { DisabledEmbeddingsProvider, EmbeddingsProvider } from "./embeddings/provider.js";
 import { OllamaEmbeddingsProvider } from "./embeddings/ollama.js";
 import { MemoryService } from "./memoryService.js";
+import {
+  TOOL_ASSISTED_CAPTURE_SKIP_REASON,
+  defaultSkipToolAssisted,
+  readToolAssistanceFromFile,
+} from "./toolAssistance.js";
 import { GetContextResult, MemoryItem } from "./types.js";
 
 export interface ClaudeHookPayload {
@@ -23,6 +28,7 @@ interface TurnState {
   prompt: string;
   is_slash_command: boolean;
   project_path: string;
+  transcript_path?: string;
   updated_at: string;
 }
 
@@ -140,6 +146,8 @@ export class FileTurnStateStore implements StateStore {
     return {
       prompt: parsed.prompt,
       project_path: parsed.project_path,
+      transcript_path:
+        typeof parsed.transcript_path === "string" ? parsed.transcript_path : undefined,
       updated_at: parsed.updated_at,
       is_slash_command: parsed.is_slash_command,
     };
@@ -209,6 +217,7 @@ export async function handleUserPromptSubmit(
     prompt: payload.prompt,
     is_slash_command: slashCommand,
     project_path: projectPath,
+    transcript_path: payload.transcript_path,
     updated_at: nowIso(),
   });
 
@@ -255,19 +264,37 @@ export async function handleStop(
     }
 
     const transcript = `User: ${state.prompt}\nAssistant: ${assistantText}`;
+    const toolAssistance = defaultSkipToolAssisted()
+      ? readToolAssistanceFromFile(
+          "claude",
+          payload.transcript_path ?? state.transcript_path,
+        )
+      : null;
+    const captureSkipped = toolAssistance?.assisted === true;
+    const tags = captureSkipped ? ["turn-log", "tool-assisted"] : ["turn-log"];
+
     await memory.upsert({
       scope: { type: "session", id: payload.session_id },
       content: transcript,
       importance: 0.35,
-      tags: ["turn-log"],
+      tags,
       ttl_days: 14,
       metadata: {
         project_path: state.project_path,
         source_agent: "claude-hook",
         session_id: payload.session_id,
         role: "dialog_turn",
+        capture_skipped: captureSkipped,
+        capture_skip_reason: captureSkipped
+          ? TOOL_ASSISTED_CAPTURE_SKIP_REASON
+          : undefined,
+        tool_assistance: toolAssistance ?? undefined,
       },
     });
+
+    if (captureSkipped) {
+      return;
+    }
 
     await memory.capture({
       scope: { type: "project", id: state.project_path },
