@@ -107,6 +107,7 @@ Useful flags:
 scripts/install-clients.sh --dry-run
 scripts/install-clients.sh --codex
 scripts/install-clients.sh --xcode
+scripts/install-clients.sh --automations-mode create
 scripts/install-clients.sh --agent-memory-home "$HOME/.agent-memory"
 scripts/install-clients.sh --force
 ```
@@ -115,6 +116,7 @@ What the installer does:
 
 - updates `~/.codex/config.toml`
 - updates `~/Library/Developer/Xcode/CodingAssistant/codex/config.toml` when that directory already exists
+- can create the recommended Codex automations under `~/.codex/automations`
 - creates backups before editing existing config files
 - writes changes atomically
 
@@ -271,6 +273,12 @@ Use the bootstrap command to print the recommended Codex automation set for a wo
 
 ```bash
 npm run -s automation:bootstrap -- --project-path "$HOME/projects/agent-memory"
+```
+
+To let the installer create or update the recommended automations:
+
+```bash
+scripts/install-clients.sh --codex --automations-mode create --project-path "$HOME/projects/agent-memory"
 ```
 
 The bootstrap output is the onboarding source of truth for:

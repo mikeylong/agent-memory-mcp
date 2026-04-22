@@ -14,6 +14,7 @@ Options:
   --xcode                     Configure Xcode only
   --all                       Configure both clients (default)
   --agents-mode <mode>        Configure AGENTS.md memory policy: ask, global, project, print, or skip (default: ask)
+  --automations-mode <mode>   Configure recommended Codex automations: ask, create, print, or skip (default: ask)
   --agent-memory-home <path>  Set AGENT_MEMORY_HOME (default: $HOME/.agent-memory)
   --project-path <path>       Workspace path to use for recommended automation setup (default: pwd)
   --repo-path <path>          Repo path containing dist/index.js (default: script repo root)
@@ -25,6 +26,7 @@ Examples:
   scripts/install-clients.sh
   scripts/install-clients.sh --codex --dry-run
   scripts/install-clients.sh --codex --agents-mode global
+  scripts/install-clients.sh --codex --automations-mode create
   scripts/install-clients.sh --codex --project-path "$HOME/projects/agent-memory"
   scripts/install-clients.sh --xcode --force
 EOF
@@ -38,6 +40,11 @@ die() {
 json_field() {
   local field_name="$1"
   node -e 'const fs=require("node:fs"); const data=JSON.parse(fs.readFileSync(0,"utf8")); const value=data[process.argv[1]]; if (value === undefined || value === null) process.exit(0); if (typeof value === "string") { process.stdout.write(value); } else { process.stdout.write(String(value)); }' "$field_name"
+}
+
+json_array_lines() {
+  local field_name="$1"
+  node -e 'const fs=require("node:fs"); const data=JSON.parse(fs.readFileSync(0,"utf8")); const values=data[process.argv[1]]; if (!Array.isArray(values)) process.exit(0); for (const value of values) console.log(String(value));' "$field_name"
 }
 
 realpath_fallback() {
@@ -56,6 +63,7 @@ TARGET_XCODE=0
 DRY_RUN=0
 FORCE=0
 AGENTS_MODE="ask"
+AUTOMATIONS_MODE="ask"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -75,6 +83,11 @@ while [[ $# -gt 0 ]]; do
     --agents-mode)
       [[ $# -ge 2 ]] || die "--agents-mode requires a value"
       AGENTS_MODE="$2"
+      shift 2
+      ;;
+    --automations-mode)
+      [[ $# -ge 2 ]] || die "--automations-mode requires a value"
+      AUTOMATIONS_MODE="$2"
       shift 2
       ;;
     --agent-memory-home)
@@ -118,6 +131,14 @@ case "$AGENTS_MODE" in
     ;;
 esac
 
+case "$AUTOMATIONS_MODE" in
+  ask|create|print|skip)
+    ;;
+  *)
+    die "Invalid --automations-mode: $AUTOMATIONS_MODE"
+    ;;
+esac
+
 if [[ $TARGET_CODEX -eq 0 && $TARGET_XCODE -eq 0 ]]; then
   TARGET_CODEX=1
   TARGET_XCODE=1
@@ -141,6 +162,7 @@ declare -a SKIPPED=()
 declare -a FOLLOW_UP=()
 declare -a AUTOMATION_RECOMMENDATIONS=()
 declare -a AGENTS_POLICY=()
+declare -a AUTOMATION_ACTIONS=()
 
 AGENTS_START_MARKER="<!-- agent-memory-mcp:start -->"
 AGENTS_END_MARKER="<!-- agent-memory-mcp:end -->"
@@ -848,6 +870,294 @@ configure_agents_policy() {
   esac
 }
 
+configure_recommended_automations_from_report() {
+  local mode="$1"
+  local bootstrap_output="$2"
+
+  local node_output
+  if ! node_output="$(
+    BOOTSTRAP_JSON="$bootstrap_output" \
+    CODEX_HOME="${HOME}/.codex" \
+    AUTOMATIONS_ACTION="$mode" \
+    DRY_RUN="$DRY_RUN" \
+    BACKUP_TIMESTAMP="$(timestamp)" \
+    node <<'EOF'
+const fs = require("node:fs");
+const path = require("node:path");
+
+const report = JSON.parse(process.env.BOOTSTRAP_JSON ?? "{}");
+const codexHome = path.resolve(process.env.CODEX_HOME ?? path.join(process.env.HOME ?? "", ".codex"));
+const automationsDir = path.join(codexHome, "automations");
+const action = process.env.AUTOMATIONS_ACTION;
+const dryRun = process.env.DRY_RUN === "1";
+const backupTimestamp = process.env.BACKUP_TIMESTAMP;
+const now = Date.now();
+const actions = [];
+const followUp = [];
+
+const stableIdsByName = new Map([
+  ["Memory health drift", "memory-health-drift"],
+  ["Memory import sync", "memory-import-sync"],
+  ["Memory QA smoke", "memory-qa-smoke"],
+  ["Memory cleanup", "memory-cleanup"],
+  ["Memory Durability Audit", "memory-durability-audit"],
+]);
+
+function quote(value) {
+  return JSON.stringify(String(value));
+}
+
+function stableIdFor(automation) {
+  const explicit = typeof automation.id === "string" && automation.id.length > 0 ? automation.id : undefined;
+  const fallback = stableIdsByName.get(String(automation.name));
+  if (!explicit && !fallback) {
+    throw new Error(`No stable automation id is known for ${automation.name}`);
+  }
+  return explicit ?? fallback;
+}
+
+function extractStringField(content, key) {
+  const match = content.match(new RegExp(`^\\s*${key}\\s*=\\s*("(?:\\\\.|[^"\\\\])*")\\s*$`, "m"));
+  if (!match) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(match[1]);
+    return typeof parsed === "string" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function extractNumberField(content, key) {
+  const match = content.match(new RegExp(`^\\s*${key}\\s*=\\s*([0-9]+)\\s*$`, "m"));
+  return match ? Number(match[1]) : undefined;
+}
+
+function parseExisting(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return undefined;
+  }
+
+  const content = fs.readFileSync(filePath, "utf8");
+  return {
+    id: path.basename(path.dirname(filePath)),
+    filePath,
+    content,
+    name: extractStringField(content, "name"),
+    createdAt: extractNumberField(content, "created_at"),
+  };
+}
+
+function discoverExistingAutomations() {
+  if (!fs.existsSync(automationsDir)) {
+    return [];
+  }
+
+  return fs
+    .readdirSync(automationsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(automationsDir, entry.name, "automation.toml"))
+    .filter((filePath) => fs.existsSync(filePath))
+    .sort((left, right) => left.localeCompare(right))
+    .map((filePath) => parseExisting(filePath))
+    .filter((entry) => entry !== undefined);
+}
+
+function renderAutomationToml(automation, id, createdAt) {
+  const cwds = Array.isArray(automation.cwds) ? automation.cwds : [];
+  const kind = automation.kind ?? "cron";
+  const executionEnvironment = automation.executionEnvironment ?? "local";
+  const model = automation.model ?? "gpt-5.4-mini";
+  const reasoningEffort = automation.reasoningEffort ?? "medium";
+  const created = Number.isFinite(createdAt) ? createdAt : now;
+
+  return [
+    "version = 1",
+    `id = ${quote(id)}`,
+    `name = ${quote(automation.name)}`,
+    `prompt = ${quote(automation.prompt)}`,
+    `status = ${quote(automation.status ?? "ACTIVE")}`,
+    `rrule = ${quote(automation.rrule)}`,
+    `kind = ${quote(kind)}`,
+    `execution_environment = ${quote(executionEnvironment)}`,
+    `model = ${quote(model)}`,
+    `reasoning_effort = ${quote(reasoningEffort)}`,
+    `cwds = [${cwds.map((cwd) => quote(cwd)).join(", ")}]`,
+    `created_at = ${created}`,
+    `updated_at = ${now}`,
+    "",
+  ].join("\n");
+}
+
+function writeAtomicFile(targetPath, finalContent) {
+  const parentDir = path.dirname(targetPath);
+  fs.mkdirSync(parentDir, { recursive: true });
+  const tempPath = path.join(parentDir, `.agent-memory-config.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`);
+  fs.writeFileSync(tempPath, finalContent, "utf8");
+  fs.renameSync(tempPath, targetPath);
+}
+
+function printDefinitions(automations) {
+  followUp.push("Recommended Codex automation definitions:");
+  for (const automation of automations) {
+    const id = stableIdFor(automation);
+    followUp.push(`Target path: ${path.join(automationsDir, id, "automation.toml")}`);
+    for (const line of renderAutomationToml(automation, id, now).trimEnd().split("\n")) {
+      followUp.push(line);
+    }
+  }
+}
+
+const automations = Array.isArray(report.automations) ? report.automations : [];
+
+if (action === "print") {
+  printDefinitions(automations);
+  actions.push(dryRun ? "Would print recommended Codex automation definitions" : "Printed recommended Codex automation definitions");
+  console.log(JSON.stringify({ actions, followUp }));
+  process.exit(0);
+}
+
+const existingAutomations = discoverExistingAutomations();
+
+for (const automation of automations) {
+  const stableId = stableIdFor(automation);
+  const exactPath = Array.isArray(automation.matching_paths)
+    ? automation.matching_paths.find((filePath) => fs.existsSync(filePath))
+    : undefined;
+
+  if (exactPath) {
+    actions.push(`Unchanged ${automation.name} automation at ${exactPath}`);
+    continue;
+  }
+
+  const stablePath = path.join(automationsDir, stableId, "automation.toml");
+  const existingByStableId = parseExisting(stablePath);
+  const existingByName = existingByStableId
+    ? undefined
+    : existingAutomations.find((entry) => entry.name === automation.name);
+  const targetPath = existingByStableId?.filePath ?? existingByName?.filePath ?? stablePath;
+  const targetId = path.basename(path.dirname(targetPath));
+  const existing = existingByStableId ?? existingByName;
+  const finalContent = renderAutomationToml(automation, targetId, existing?.createdAt);
+
+  if (!existing) {
+    if (!dryRun) {
+      writeAtomicFile(targetPath, finalContent);
+    }
+    actions.push(`${dryRun ? "Would create" : "Created"} ${automation.name} automation at ${targetPath}`);
+    continue;
+  }
+
+  if (!dryRun) {
+    const backupPath = `${targetPath}.bak.${backupTimestamp}`;
+    fs.copyFileSync(targetPath, backupPath);
+    actions.push(`Created backup ${backupPath}`);
+    writeAtomicFile(targetPath, finalContent);
+  }
+
+  actions.push(`${dryRun ? "Would update" : "Updated"} ${automation.name} automation at ${targetPath}`);
+}
+
+console.log(JSON.stringify({ actions, followUp }));
+EOF
+  )"; then
+    die "Failed to configure recommended Codex automations"
+  fi
+
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && AUTOMATION_ACTIONS+=("$line")
+  done < <(printf '%s' "$node_output" | json_array_lines actions)
+
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && FOLLOW_UP+=("$line")
+  done < <(printf '%s' "$node_output" | json_array_lines followUp)
+}
+
+install_automations_mode() {
+  local mode="$1"
+  local bootstrap_script="${REPO_PATH}/dist/automationBootstrap.js"
+
+  case "$mode" in
+    create|print)
+      ;;
+    skip)
+      if [[ $DRY_RUN -eq 1 ]]; then
+        AUTOMATION_ACTIONS+=("Would skip recommended Codex automation installation")
+      else
+        AUTOMATION_ACTIONS+=("Skipped recommended Codex automation installation")
+      fi
+      return 0
+      ;;
+    *)
+      die "Invalid recommended automation mode: $mode"
+      ;;
+  esac
+
+  if [[ ! -f "$bootstrap_script" ]]; then
+    if [[ $DRY_RUN -eq 1 ]]; then
+      AUTOMATION_ACTIONS+=("Would skip recommended Codex automation installation because bootstrap helper was not found at $bootstrap_script")
+    else
+      AUTOMATION_ACTIONS+=("Skipped recommended Codex automation installation because bootstrap helper was not found at $bootstrap_script")
+    fi
+    FOLLOW_UP+=("Codex next step: run npm run -s automation:bootstrap -- --project-path \"$AUTOMATION_PROJECT_PATH\" after rebuilding the repo.")
+    return 0
+  fi
+
+  local bootstrap_output
+  if ! bootstrap_output="$("$NODE_COMMAND" "$bootstrap_script" --project-path "$AUTOMATION_PROJECT_PATH")"; then
+    AUTOMATION_ACTIONS+=("Skipped recommended Codex automation installation because bootstrap helper failed")
+    FOLLOW_UP+=("Codex next step: run npm run -s automation:bootstrap -- --project-path \"$AUTOMATION_PROJECT_PATH\" manually.")
+    return 0
+  fi
+
+  configure_recommended_automations_from_report "$mode" "$bootstrap_output"
+}
+
+configure_recommended_automations() {
+  if [[ "$AUTOMATIONS_MODE" != "ask" ]]; then
+    install_automations_mode "$AUTOMATIONS_MODE"
+    return 0
+  fi
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    AUTOMATION_ACTIONS+=("Would ask how to configure recommended Codex automations")
+    return 0
+  fi
+
+  if ! installer_is_interactive; then
+    AUTOMATION_ACTIONS+=("Skipped recommended Codex automation prompt because stdin is non-interactive")
+    FOLLOW_UP+=("Recommended command: scripts/install-clients.sh --codex --automations-mode create")
+    return 0
+  fi
+
+  echo
+  echo "Configure recommended Codex automations?"
+  echo "1. Create recommended Codex automations (Recommended)"
+  echo "2. Print definitions only"
+  echo "3. Skip"
+  printf "Select an option [1]: "
+
+  local choice
+  IFS= read -r choice || choice=""
+
+  case "$choice" in
+    ""|1)
+      install_automations_mode "create"
+      ;;
+    2)
+      install_automations_mode "print"
+      ;;
+    3)
+      install_automations_mode "skip"
+      ;;
+    *)
+      die "Invalid recommended automation menu choice: $choice"
+      ;;
+  esac
+}
+
 install_codex() {
   local config_path="${HOME}/.codex/config.toml"
   upsert_toml_file "$config_path" "Codex" 1 "node" "args-first"
@@ -970,6 +1280,16 @@ print_summary() {
   fi
 
   echo
+  echo "Recommended automation actions:"
+  if [[ ${#AUTOMATION_ACTIONS[@]} -eq 0 ]]; then
+    echo "- none"
+  else
+    for item in "${AUTOMATION_ACTIONS[@]}"; do
+      echo "- $item"
+    done
+  fi
+
+  echo
   echo "Follow-up:"
   if [[ ${#FOLLOW_UP[@]} -eq 0 ]]; then
     echo "- none"
@@ -999,6 +1319,8 @@ if [[ $TARGET_XCODE -eq 1 ]]; then
 fi
 
 configure_agents_policy
+
+configure_recommended_automations
 
 collect_automation_recommendations
 

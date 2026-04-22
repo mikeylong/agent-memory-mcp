@@ -19,6 +19,7 @@ function writeAutomationToml(
   codexHome: string,
   id: string,
   automation: {
+    id?: string;
     name: string;
     prompt: string;
     status: string;
@@ -46,13 +47,14 @@ function writeAutomationToml(
     [
       ...runtimeFields,
       'version = "1"',
+      automation.id ? `id = ${JSON.stringify(automation.id)}` : undefined,
       `name = ${JSON.stringify(automation.name)}`,
       `prompt = ${JSON.stringify(automation.prompt)}`,
       `status = ${JSON.stringify(automation.status)}`,
       `rrule = ${JSON.stringify(automation.rrule)}`,
       "",
       `cwds = [${automation.cwds.map((cwd) => JSON.stringify(cwd)).join(", ")}]`,
-    ].join("\n"),
+    ].filter((entry): entry is string => entry !== undefined).join("\n"),
     "utf8",
   );
 }
@@ -83,6 +85,7 @@ describe("automation bootstrap recommendations", () => {
     expect(
       report.automations.map((automation) => ({
         name: automation.name,
+        id: automation.id,
         rrule: automation.rrule,
         prompt: automation.prompt,
         cwds: automation.cwds,
@@ -90,6 +93,7 @@ describe("automation bootstrap recommendations", () => {
       })),
     ).toEqual([
       {
+        id: "memory-health-drift",
         name: "Memory health drift",
         rrule: "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;BYHOUR=9;BYMINUTE=0",
         prompt:
@@ -98,6 +102,7 @@ describe("automation bootstrap recommendations", () => {
         presence: "missing",
       },
       {
+        id: "memory-import-sync",
         name: "Memory import sync",
         rrule: "FREQ=HOURLY;INTERVAL=6",
         prompt: `Run npm run -s automation:import-sync -- --project-path ${projectPath}. Report per source whether Codex and Claude were imported, skipped, missing, or errored, and include session file paths, imported message counts, and captured created and deduped counts.`,
@@ -105,6 +110,7 @@ describe("automation bootstrap recommendations", () => {
         presence: "missing",
       },
       {
+        id: "memory-qa-smoke",
         name: "Memory QA smoke",
         rrule: "FREQ=WEEKLY;BYDAY=MO;BYHOUR=10;BYMINUTE=0",
         prompt:
@@ -113,6 +119,7 @@ describe("automation bootstrap recommendations", () => {
         presence: "missing",
       },
       {
+        id: "memory-cleanup",
         name: "Memory cleanup",
         rrule: "FREQ=WEEKLY;BYDAY=SU;BYHOUR=11;BYMINUTE=0",
         prompt:
@@ -121,6 +128,7 @@ describe("automation bootstrap recommendations", () => {
         presence: "missing",
       },
       {
+        id: "memory-durability-audit",
         name: "Memory Durability Audit",
         rrule: "FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=0",
         prompt:

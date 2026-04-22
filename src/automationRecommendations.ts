@@ -4,6 +4,7 @@ import path from "node:path";
 export type AutomationPresence = "present" | "missing";
 
 export interface RecommendedAutomationDefinition {
+  id: string;
   name: string;
   prompt: string;
   rrule: string;
@@ -192,6 +193,7 @@ export function buildRecommendedAutomationDefinitions(
 
   return [
     {
+      id: "memory-health-drift",
       name: "Memory health drift",
       prompt: DAILY_HEALTH_PROMPT,
       rrule: "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;BYHOUR=9;BYMINUTE=0",
@@ -199,6 +201,7 @@ export function buildRecommendedAutomationDefinitions(
       cwds: [resolvedRepoPath],
     },
     {
+      id: "memory-import-sync",
       name: "Memory import sync",
       prompt: `${IMPORT_SYNC_PROMPT_PREFIX} ${resolvedProjectPath}. ${IMPORT_SYNC_PROMPT_SUFFIX}`,
       rrule: "FREQ=HOURLY;INTERVAL=6",
@@ -206,6 +209,7 @@ export function buildRecommendedAutomationDefinitions(
       cwds: [resolvedRepoPath],
     },
     {
+      id: "memory-qa-smoke",
       name: "Memory QA smoke",
       prompt: QA_PROMPT,
       rrule: "FREQ=WEEKLY;BYDAY=MO;BYHOUR=10;BYMINUTE=0",
@@ -213,6 +217,7 @@ export function buildRecommendedAutomationDefinitions(
       cwds: [resolvedRepoPath],
     },
     {
+      id: "memory-cleanup",
       name: "Memory cleanup",
       prompt: CLEANUP_PROMPT,
       rrule: "FREQ=WEEKLY;BYDAY=SU;BYHOUR=11;BYMINUTE=0",
@@ -220,6 +225,7 @@ export function buildRecommendedAutomationDefinitions(
       cwds: [resolvedRepoPath],
     },
     {
+      id: "memory-durability-audit",
       name: "Memory Durability Audit",
       prompt: MEMORY_DURABILITY_AUDIT_PROMPT,
       rrule: "FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=0",

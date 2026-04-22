@@ -8,6 +8,13 @@ const repoRoot = path.resolve(__dirname, "../..");
 const scriptPath = path.join(repoRoot, "scripts", "install-clients.sh");
 const agentsStartMarker = "<!-- agent-memory-mcp:start -->";
 const agentsEndMarker = "<!-- agent-memory-mcp:end -->";
+const automationIdsByName: Record<string, string> = {
+  "Memory health drift": "memory-health-drift",
+  "Memory import sync": "memory-import-sync",
+  "Memory QA smoke": "memory-qa-smoke",
+  "Memory cleanup": "memory-cleanup",
+  "Memory Durability Audit": "memory-durability-audit",
+};
 
 const cleanupDirs: string[] = [];
 
@@ -25,7 +32,12 @@ function createRepoFixture(): string {
   return repoPath;
 }
 
-function makeAutomationReport(repoPath: string, projectPath: string, presentNames: string[]) {
+function makeAutomationReport(
+  repoPath: string,
+  projectPath: string,
+  presentNames: string[],
+  codexHome?: string,
+) {
   const names = [
     "Memory health drift",
     "Memory import sync",
@@ -44,14 +56,18 @@ function makeAutomationReport(repoPath: string, projectPath: string, presentName
       missing: names.length - presentNames.length,
     },
     automations: names.map((name) => ({
+      id: automationIdsByName[name],
       name,
       prompt: `${name} prompt`,
       rrule: `${name} schedule`,
       status: "ACTIVE",
       cwds: [repoPath],
       presence: presentNames.includes(name) ? "present" : "missing",
-      matching_ids: presentNames.includes(name) ? [name.toLowerCase().replace(/\s+/g, "-")] : [],
-      matching_paths: [],
+      matching_ids: presentNames.includes(name) ? [automationIdsByName[name]] : [],
+      matching_paths:
+        presentNames.includes(name) && codexHome
+          ? [path.join(codexHome, "automations", automationIdsByName[name], "automation.toml")]
+          : [],
     })),
   };
 }
@@ -84,6 +100,21 @@ function runInstaller(
 
 function markerCount(content: string, marker: string): number {
   return content.split(marker).length - 1;
+}
+
+function automationTomlPath(homeDir: string, id: string): string {
+  return path.join(homeDir, ".codex", "automations", id, "automation.toml");
+}
+
+function readAutomationToml(homeDir: string, id: string): string {
+  return fs.readFileSync(automationTomlPath(homeDir, id), "utf8");
+}
+
+function writeExistingAutomation(homeDir: string, id: string, content: string): string {
+  const filePath = automationTomlPath(homeDir, id);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, content, "utf8");
+  return filePath;
 }
 
 afterEach(() => {
@@ -389,6 +420,179 @@ describe("install-clients.sh", () => {
     );
     expect(result.stdout).toContain("Missing: none");
     expect(result.stdout).toContain("Codex next step: all recommended automations are already present.");
+  });
+
+  it("creates all missing recommended Codex automations when requested", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+
+    const result = runInstaller(["--codex", "--agents-mode", "skip", "--automations-mode", "create"], homeDir, repoPath);
+    expect(result.status).toBe(0);
+
+    for (const [name, id] of Object.entries(automationIdsByName)) {
+      const content = readAutomationToml(homeDir, id);
+      expect(content).toContain("version = 1");
+      expect(content).toContain(`id = "${id}"`);
+      expect(content).toContain(`name = "${name}"`);
+      expect(content).toContain(`prompt = "${name} prompt"`);
+      expect(content).toContain("kind = \"cron\"");
+      expect(content).toContain("execution_environment = \"local\"");
+      expect(content).toContain("model = \"gpt-5.4-mini\"");
+      expect(content).toContain("reasoning_effort = \"medium\"");
+      expect(content).toContain(`cwds = ["${repoPath}"]`);
+      expect(content).toMatch(/^created_at = \d+$/m);
+      expect(content).toMatch(/^updated_at = \d+$/m);
+      expect(result.stdout).toContain(`Created ${name} automation`);
+    }
+  });
+
+  it("leaves exact matching recommended Codex automations unchanged", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+    const codexHome = path.join(homeDir, ".codex");
+    const automationPath = writeExistingAutomation(
+      homeDir,
+      "memory-health-drift",
+      [
+        'name = "Memory health drift"',
+        'prompt = "already exact according to bootstrap"',
+        "",
+      ].join("\n"),
+    );
+    writeAutomationBootstrapFixture(
+      repoPath,
+      makeAutomationReport(repoPath, repoPath, ["Memory health drift"], codexHome),
+    );
+    const beforeStat = fs.statSync(automationPath);
+
+    const result = runInstaller(["--codex", "--agents-mode", "skip", "--automations-mode", "create"], homeDir, repoPath);
+    const afterStat = fs.statSync(automationPath);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`Unchanged Memory health drift automation at ${automationPath}`);
+    expect(fs.readFileSync(automationPath, "utf8")).toContain("already exact according to bootstrap");
+    expect(afterStat.mtimeMs).toBe(beforeStat.mtimeMs);
+    expect(fs.readdirSync(path.dirname(automationPath)).filter((entry) => entry.startsWith("automation.toml.bak.")).length).toBe(0);
+  });
+
+  it("backs up and updates existing recommended automation stable-id conflicts", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+    const automationPath = writeExistingAutomation(
+      homeDir,
+      "memory-import-sync",
+      [
+        'name = "Old import sync"',
+        'prompt = "old prompt"',
+        "created_at = 123",
+        "",
+      ].join("\n"),
+    );
+
+    const result = runInstaller(["--codex", "--agents-mode", "skip", "--automations-mode", "create"], homeDir, repoPath);
+    expect(result.status).toBe(0);
+
+    const content = fs.readFileSync(automationPath, "utf8");
+    expect(content).toContain('id = "memory-import-sync"');
+    expect(content).toContain('name = "Memory import sync"');
+    expect(content).toContain('prompt = "Memory import sync prompt"');
+    expect(content).toContain("created_at = 123");
+    expect(result.stdout).toContain(`Updated Memory import sync automation at ${automationPath}`);
+    expect(fs.readdirSync(path.dirname(automationPath)).filter((entry) => entry.startsWith("automation.toml.bak.")).length).toBe(1);
+  });
+
+  it("backs up and updates existing recommended automations with the same name under another id", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+    const customPath = writeExistingAutomation(
+      homeDir,
+      "custom-cleanup",
+      [
+        'name = "Memory cleanup"',
+        'prompt = "old cleanup prompt"',
+        "created_at = 456",
+        "",
+      ].join("\n"),
+    );
+
+    const result = runInstaller(["--codex", "--agents-mode", "skip", "--automations-mode", "create"], homeDir, repoPath);
+    expect(result.status).toBe(0);
+
+    const content = fs.readFileSync(customPath, "utf8");
+    expect(content).toContain('id = "custom-cleanup"');
+    expect(content).toContain('name = "Memory cleanup"');
+    expect(content).toContain('prompt = "Memory cleanup prompt"');
+    expect(content).toContain("created_at = 456");
+    expect(fs.existsSync(automationTomlPath(homeDir, "memory-cleanup"))).toBe(false);
+    expect(result.stdout).toContain(`Updated Memory cleanup automation at ${customPath}`);
+    expect(fs.readdirSync(path.dirname(customPath)).filter((entry) => entry.startsWith("automation.toml.bak.")).length).toBe(1);
+  });
+
+  it("prints recommended Codex automation definitions without writing files", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+
+    const result = runInstaller(["--codex", "--agents-mode", "skip", "--automations-mode", "print"], homeDir, repoPath);
+    expect(result.status).toBe(0);
+
+    expect(result.stdout).toContain("Printed recommended Codex automation definitions");
+    expect(result.stdout).toContain("Recommended Codex automation definitions:");
+    expect(result.stdout).toContain('id = "memory-health-drift"');
+    expect(fs.existsSync(path.join(homeDir, ".codex", "automations"))).toBe(false);
+  });
+
+  it("does not write recommended Codex automations in default ask mode when stdin is non-interactive", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+
+    const result = runInstaller(["--codex", "--agents-mode", "skip"], homeDir, repoPath);
+    expect(result.status).toBe(0);
+
+    expect(result.stdout).toContain("Skipped recommended Codex automation prompt because stdin is non-interactive");
+    expect(result.stdout).toContain("scripts/install-clients.sh --codex --automations-mode create");
+    expect(fs.existsSync(path.join(homeDir, ".codex", "automations"))).toBe(false);
+  });
+
+  it("selects recommended Codex automation creation when interactive ask receives Enter", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+
+    const result = runInstaller(
+      ["--codex", "--agents-mode", "skip"],
+      homeDir,
+      repoPath,
+      { AGENT_MEMORY_INSTALL_FORCE_INTERACTIVE: "1" },
+      "\n",
+    );
+    expect(result.status).toBe(0);
+
+    expect(result.stdout).toContain("Create recommended Codex automations (Recommended)");
+    expect(readAutomationToml(homeDir, "memory-health-drift")).toContain('name = "Memory health drift"');
+  });
+
+  it("reports planned recommended Codex automation changes in dry-run create mode", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+
+    const result = runInstaller(
+      ["--codex", "--agents-mode", "skip", "--automations-mode", "create", "--dry-run"],
+      homeDir,
+      repoPath,
+    );
+    expect(result.status).toBe(0);
+
+    expect(result.stdout).toContain("Would create Memory health drift automation");
+    expect(fs.existsSync(path.join(homeDir, ".codex", "automations"))).toBe(false);
+  });
+
+  it("fails cleanly for an invalid recommended Codex automations mode", () => {
+    const homeDir = tempDir("agent-memory-install-home-");
+    const repoPath = createRepoFixture();
+
+    const result = runInstaller(["--codex", "--automations-mode", "bogus"], homeDir, repoPath);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("Invalid --automations-mode: bogus");
   });
 
   it("prints manual follow-up when the Xcode config directory is unavailable", () => {
