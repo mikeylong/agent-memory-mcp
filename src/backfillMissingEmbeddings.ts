@@ -458,9 +458,12 @@ export async function runBackfill(
     throw new Error("Embeddings are disabled; unset AGENT_MEMORY_DISABLE_EMBEDDINGS before applying backfill");
   }
 
-  const healthy = await runtime.embeddings.checkHealth();
-  if (!healthy) {
-    throw new Error("Embeddings provider is not healthy; run with --dry-run or fix the provider before applying backfill");
+  const health = await runtime.embeddings.checkHealth();
+  if (!health.ok) {
+    const detail = health.message ? ` Last failure: ${health.message}` : "";
+    throw new Error(
+      `Embeddings provider is not healthy after ${health.attempts} check attempt(s); run with --dry-run or fix the provider before applying backfill.${detail}`,
+    );
   }
 
   const rows = queryMissingRows(runtime.db, options);

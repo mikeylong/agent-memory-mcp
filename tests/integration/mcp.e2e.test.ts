@@ -903,6 +903,7 @@ describe("agent-memory-mcp integration", () => {
     expect(healthyPayload.retrieval_mode).toBe("semantic+lexical");
     expect(healthyPayload.embeddings_provider).toBe("ollama");
     expect(healthyPayload.embeddings_reason).toBe("healthy");
+    expect(healthyPayload.embeddings_diagnostic).toBeUndefined();
     expect(healthyPayload.actions).toEqual([]);
     expect(healthyPayload.stats.memories.active).toBe(0);
     expect(healthyPayload.stats.storage.idempotency_keys).toBe(0);
@@ -923,6 +924,11 @@ describe("agent-memory-mcp integration", () => {
     expect(degradedPayload.retrieval_mode).toBe("lexical-only");
     expect(degradedPayload.embeddings_provider).toBe("ollama");
     expect(degradedPayload.embeddings_reason).toBe("provider_unreachable");
+    expect(degradedPayload.embeddings_diagnostic).toMatchObject({
+      attempts: 3,
+      endpoint: "http://127.0.0.1:9/api/tags",
+    });
+    expect(typeof degradedPayload.embeddings_diagnostic.message).toBe("string");
     expect(Array.isArray(degradedPayload.actions)).toBe(true);
     expect(degradedPayload.actions.length).toBeGreaterThan(0);
     expect(degradedPayload.stats.memories.active).toBe(0);

@@ -560,9 +560,12 @@ export async function runChunkTranscripts(
     throw new Error("Embeddings are disabled; unset AGENT_MEMORY_DISABLE_EMBEDDINGS before applying transcript chunking");
   }
 
-  const healthy = await runtime.embeddings.checkHealth();
-  if (!healthy) {
-    throw new Error("Embeddings provider is not healthy; run with --dry-run or fix the provider before applying transcript chunking");
+  const health = await runtime.embeddings.checkHealth();
+  if (!health.ok) {
+    const detail = health.message ? ` Last failure: ${health.message}` : "";
+    throw new Error(
+      `Embeddings provider is not healthy after ${health.attempts} check attempt(s); run with --dry-run or fix the provider before applying transcript chunking.${detail}`,
+    );
   }
 
   const configVersion = transcriptChunkConfigVersion(options);

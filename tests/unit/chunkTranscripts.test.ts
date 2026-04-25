@@ -5,7 +5,10 @@ import {
   runChunkTranscripts,
   type ChunkTranscriptOptions,
 } from "../../src/chunkTranscripts.js";
-import type { EmbeddingsProvider } from "../../src/embeddings/provider.js";
+import type {
+  EmbeddingsHealthResult,
+  EmbeddingsProvider,
+} from "../../src/embeddings/provider.js";
 import { transcriptContentHash } from "../../src/transcriptChunks.js";
 import { createTestMemoryService } from "../helpers.js";
 
@@ -14,8 +17,8 @@ class FakeEmbeddingsProvider implements EmbeddingsProvider {
   readonly enabled = true;
   readonly inputs: string[] = [];
 
-  async checkHealth(): Promise<boolean> {
-    return true;
+  async checkHealth(): Promise<EmbeddingsHealthResult> {
+    return { ok: true, attempts: 1 };
   }
 
   async embed(texts: string[]): Promise<number[][]> {

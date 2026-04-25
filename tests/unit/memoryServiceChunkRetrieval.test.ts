@@ -3,15 +3,18 @@ import {
   defaultChunkTranscriptOptions,
   runChunkTranscripts,
 } from "../../src/chunkTranscripts.js";
-import type { EmbeddingsProvider } from "../../src/embeddings/provider.js";
+import type {
+  EmbeddingsHealthResult,
+  EmbeddingsProvider,
+} from "../../src/embeddings/provider.js";
 import { createTestMemoryService } from "../helpers.js";
 
 class SynonymEmbeddingsProvider implements EmbeddingsProvider {
   readonly name = "fake";
   readonly enabled = true;
 
-  async checkHealth(): Promise<boolean> {
-    return true;
+  async checkHealth(): Promise<EmbeddingsHealthResult> {
+    return { ok: true, attempts: 1 };
   }
 
   async embed(texts: string[]): Promise<number[][]> {

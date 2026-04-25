@@ -14,7 +14,7 @@ import {
 } from "./canonical.js";
 import { MemoryDb } from "./db/client.js";
 import { getLatestSchemaVersion } from "./db/migrations.js";
-import { EmbeddingsProvider } from "./embeddings/provider.js";
+import type { EmbeddingsHealthResult, EmbeddingsProvider } from "./embeddings/provider.js";
 import {
   combineScore,
   cosineSimilarity,
@@ -97,6 +97,13 @@ export type RetrievalMode = "semantic+lexical" | "lexical-only";
 export type EmbeddingsProviderKind = "ollama" | "disabled";
 export type EmbeddingsReason = "healthy" | "disabled_by_config" | "provider_unreachable";
 
+export interface EmbeddingsHealthDiagnostic {
+  attempts: number;
+  status?: number;
+  message?: string;
+  endpoint?: string;
+}
+
 export interface MemoryHealthStats {
   memories: {
     total: number;
@@ -135,6 +142,7 @@ export interface MemoryHealthStatus {
   retrieval_mode: RetrievalMode;
   embeddings_provider: EmbeddingsProviderKind;
   embeddings_reason: EmbeddingsReason;
+  embeddings_diagnostic?: EmbeddingsHealthDiagnostic;
   actions: string[];
   stats: MemoryHealthStats;
 }
@@ -311,6 +319,21 @@ function healthActions(reason: EmbeddingsReason): string[] {
     "Ensure AGENT_MEMORY_EMBED_MODEL is available in Ollama (default: nomic-embed-text).",
     "Set AGENT_MEMORY_DISABLE_EMBEDDINGS=1 to run intentionally in lexical-only mode.",
   ];
+}
+
+function healthDiagnostic(
+  result: EmbeddingsHealthResult | undefined,
+): EmbeddingsHealthDiagnostic | undefined {
+  if (!result || result.ok) {
+    return undefined;
+  }
+
+  return {
+    attempts: result.attempts,
+    ...(result.status !== undefined ? { status: result.status } : {}),
+    ...(result.message ? { message: result.message } : {}),
+    ...(result.endpoint ? { endpoint: result.endpoint } : {}),
+  };
 }
 
 function expiresAtFromTtl(now: Date, ttlDays?: number): string | null {
@@ -1709,9 +1732,10 @@ export class MemoryService {
     }
 
     let embeddingState: EmbeddingsHealthState = this.embeddingsState;
+    let embeddingHealth: EmbeddingsHealthResult | undefined;
     if (this.embeddingsProvider.enabled) {
-      const healthy = await this.embeddingsProvider.checkHealth();
-      embeddingState = healthy ? "ok" : "degraded";
+      embeddingHealth = await this.embeddingsProvider.checkHealth();
+      embeddingState = embeddingHealth.ok ? "ok" : "degraded";
       this.embeddingsState = embeddingState;
     } else {
       embeddingState = "degraded";
@@ -1730,6 +1754,7 @@ export class MemoryService {
     const retrievalMode: RetrievalMode =
       embeddingState === "ok" ? "semantic+lexical" : "lexical-only";
     const stats = this.collectHealthStats();
+    const embeddingsDiagnostic = healthDiagnostic(embeddingHealth);
 
     return {
       ok: dbState === "ok",
@@ -1739,6 +1764,7 @@ export class MemoryService {
       retrieval_mode: retrievalMode,
       embeddings_provider: embeddingsProvider,
       embeddings_reason: embeddingsReason,
+      ...(embeddingsDiagnostic ? { embeddings_diagnostic: embeddingsDiagnostic } : {}),
       actions: healthActions(embeddingsReason),
       stats,
     };
