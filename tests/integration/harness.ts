@@ -37,7 +37,8 @@ export async function createClientFixture(options: ClientFixtureOptions = {}): P
   const dbPath = path.join(tempDir, "memory.db");
   const root = process.cwd();
   const serverArgs = [
-    path.join(root, "node_modules", "tsx", "dist", "cli.mjs"),
+    "--import",
+    "tsx",
     path.join(root, "src", "index.ts"),
   ];
 

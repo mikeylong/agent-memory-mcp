@@ -79,7 +79,8 @@ async function createClientFixture(options: ClientFixtureOptions = {}): Promise<
   const root = process.cwd();
 
   const serverArgs = [
-    path.join(root, "node_modules", "tsx", "dist", "cli.mjs"),
+    "--import",
+    "tsx",
     path.join(root, "src", "index.ts"),
   ];
 
@@ -963,7 +964,8 @@ describe("agent-memory-mcp integration", () => {
     const transportB = new StdioClientTransport({
       command: process.execPath,
       args: [
-        path.join(root, "node_modules", "tsx", "dist", "cli.mjs"),
+        "--import",
+        "tsx",
         path.join(root, "src", "index.ts"),
       ],
       cwd: root,
