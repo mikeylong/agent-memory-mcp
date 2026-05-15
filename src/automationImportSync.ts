@@ -5,13 +5,16 @@ import { pathToFileURL } from "node:url";
 import {
   ensureAutomationStateDir,
   findLatestJsonlFile,
+  listJsonlFilesNewestFirst,
   parsePositiveInt,
   readJsonFile,
+  type LatestJsonlFile,
   writeJsonFile,
 } from "./automationCommon.js";
 import { loadConfig } from "./config.js";
 import {
   defaultSessionIdFromFile as defaultClaudeSessionIdFromFile,
+  extractMessages as extractClaudeMessages,
   runImport as runClaudeImport,
   type ImportOutput as ClaudeImportOutput,
 } from "./importClaudeSession.js";
@@ -27,6 +30,8 @@ type ImportSyncSource = "codex" | "claude";
 const DEFAULT_MAX_SESSION_BYTES = 1024 * 1024;
 const DEFAULT_MAX_MESSAGES = 80;
 const DEFAULT_SOURCE_TIMEOUT_MS = 120_000;
+const NO_IMPORTABLE_MESSAGES_ERROR =
+  "No importable user/assistant messages found in session file";
 
 interface ImportSourceState {
   session_file: string;
@@ -72,12 +77,14 @@ interface ImportedSourceResult {
   capture_skipped: boolean;
   capture_skip_reason?: string;
   tool_assistance: ToolAssistanceSummary;
+  skipped_candidates?: SkippedSessionCandidate[];
 }
 
 interface SkippedSourceResult {
   status: "skipped_no_new_session";
   latest_session_file: string;
   transcript_session_id: string;
+  skipped_candidates?: SkippedSessionCandidate[];
 }
 
 interface MissingSourceResult {
@@ -90,11 +97,30 @@ interface SkippedTooLargeSourceResult {
   latest_session_file: string;
   size_bytes: number;
   max_size_bytes: number;
+  skipped_candidates?: SkippedSessionCandidate[];
+}
+
+interface SkippedNoImportableSourceResult {
+  status: "skipped_no_importable_session";
+  latest_session_file: string;
+  message: string;
+  skipped_candidates: SkippedSessionCandidate[];
+  previous_session_file?: string;
+  transcript_session_id?: string;
 }
 
 interface ErrorSourceResult {
   status: "error";
   latest_session_file?: string;
+  message: string;
+  skipped_candidates?: SkippedSessionCandidate[];
+}
+
+interface SkippedSessionCandidate {
+  session_file: string;
+  mtime_ms: number;
+  size_bytes: number;
+  reason: "no_importable_messages";
   message: string;
 }
 
@@ -103,6 +129,7 @@ type SourceResult =
   | SkippedSourceResult
   | MissingSourceResult
   | SkippedTooLargeSourceResult
+  | SkippedNoImportableSourceResult
   | ErrorSourceResult;
 
 export interface ImportSyncReport {
@@ -260,6 +287,7 @@ function parseArgs(argv: string[]): ImportSyncCliOptions {
 function toImportedResult(
   latestSessionFile: string,
   output: CodexImportOutput | ClaudeImportOutput,
+  skippedCandidates: SkippedSessionCandidate[] = [],
 ): ImportedSourceResult {
   return {
     status: "imported",
@@ -274,6 +302,207 @@ function toImportedResult(
     capture_skipped: output.capture_skipped,
     capture_skip_reason: output.capture_skip_reason,
     tool_assistance: output.tool_assistance,
+    ...(skippedCandidates.length > 0 ? { skipped_candidates: skippedCandidates } : {}),
+  };
+}
+
+function sameImportedSession(
+  state: ImportSourceState | undefined,
+  candidate: LatestJsonlFile,
+): boolean {
+  return state?.session_file === candidate.path && state.mtime_ms === candidate.mtime_ms;
+}
+
+function skippedNoImportableCandidate(candidate: LatestJsonlFile): SkippedSessionCandidate {
+  return {
+    session_file: candidate.path,
+    mtime_ms: candidate.mtime_ms,
+    size_bytes: candidate.size_bytes,
+    reason: "no_importable_messages",
+    message: NO_IMPORTABLE_MESSAGES_ERROR,
+  };
+}
+
+function isNoImportableMessagesError(error: unknown): boolean {
+  return error instanceof Error && error.message === NO_IMPORTABLE_MESSAGES_ERROR;
+}
+
+function hasImportableClaudeMessages(candidate: LatestJsonlFile): boolean {
+  const rawSession = fs.readFileSync(candidate.path, "utf8");
+  return extractClaudeMessages(rawSession).length > 0;
+}
+
+async function runSourceImport(
+  source: ImportSyncSource,
+  sessionFile: string,
+  options: ImportSyncOptions,
+  maxMessages: number,
+): Promise<CodexImportOutput | ClaudeImportOutput> {
+  return source === "codex"
+    ? await runCodexImport({
+        sessionFile,
+        projectPath: options.projectPath,
+        scopeType: "project",
+        sessionId: defaultCodexSessionIdFromFile(sessionFile),
+        maxFacts: options.maxFacts,
+        maxMessages,
+        skipToolAssisted: options.skipToolAssisted,
+      })
+    : await runClaudeImport({
+        sessionFile,
+        projectPath: options.projectPath,
+        scopeType: "project",
+        sessionId: defaultClaudeSessionIdFromFile(sessionFile),
+        maxFacts: options.maxFacts,
+        maxMessages,
+        skipToolAssisted: options.skipToolAssisted,
+      });
+}
+
+async function syncClaudeSource(
+  latestRoot: string,
+  previousState: ImportSourceState | undefined,
+  options: ImportSyncOptions,
+): Promise<{
+  nextState?: ImportSourceState;
+  result: SourceResult;
+}> {
+  const maxMessages = options.maxMessages ?? DEFAULT_MAX_MESSAGES;
+  const maxSessionBytes = options.maxSessionBytes ?? DEFAULT_MAX_SESSION_BYTES;
+  const skippedCandidates: SkippedSessionCandidate[] = [];
+
+  options.progress?.(`import-sync: scanning claude root ${latestRoot}`);
+  const candidates = listJsonlFilesNewestFirst(latestRoot);
+  const latest = candidates[0];
+  if (!latest) {
+    options.progress?.("import-sync: claude has no session files");
+    return {
+      result: {
+        status: "no_session_found",
+        source_root: latestRoot,
+      },
+    };
+  }
+
+  options.progress?.(
+    `import-sync: claude latest ${latest.path} (${latest.size_bytes} bytes)`,
+  );
+
+  for (const candidate of candidates) {
+    if (previousState && sameImportedSession(previousState, candidate)) {
+      options.progress?.("import-sync: claude skipped unchanged latest importable session");
+      return {
+        nextState: previousState,
+        result: {
+          status: "skipped_no_new_session",
+          latest_session_file: candidate.path,
+          transcript_session_id: previousState.transcript_session_id,
+          ...(skippedCandidates.length > 0 ? { skipped_candidates: skippedCandidates } : {}),
+        },
+      };
+    }
+
+    if (previousState && candidate.mtime_ms <= previousState.mtime_ms) {
+      options.progress?.("import-sync: claude skipped because no newer importable session was found");
+      return {
+        nextState: previousState,
+        result: {
+          status: "skipped_no_new_session",
+          latest_session_file: previousState.session_file,
+          transcript_session_id: previousState.transcript_session_id,
+          ...(skippedCandidates.length > 0 ? { skipped_candidates: skippedCandidates } : {}),
+        },
+      };
+    }
+
+    if (candidate.size_bytes > maxSessionBytes) {
+      options.progress?.(
+        `import-sync: claude skipped because latest remaining candidate exceeds ${maxSessionBytes} bytes`,
+      );
+      return {
+        result: {
+          status: "skipped_too_large",
+          latest_session_file: candidate.path,
+          size_bytes: candidate.size_bytes,
+          max_size_bytes: maxSessionBytes,
+          ...(skippedCandidates.length > 0 ? { skipped_candidates: skippedCandidates } : {}),
+        },
+      };
+    }
+
+    let importable: boolean;
+    try {
+      importable = hasImportableClaudeMessages(candidate);
+    } catch (error) {
+      return {
+        result: {
+          status: "error",
+          latest_session_file: candidate.path,
+          message: error instanceof Error ? error.message : String(error),
+          ...(skippedCandidates.length > 0 ? { skipped_candidates: skippedCandidates } : {}),
+        },
+      };
+    }
+
+    if (!importable) {
+      options.progress?.(
+        `import-sync: claude skipping ${candidate.path} because it has no importable messages`,
+      );
+      skippedCandidates.push(skippedNoImportableCandidate(candidate));
+      continue;
+    }
+
+    try {
+      options.progress?.(
+        `import-sync: claude importing ${candidate.path} with max_messages=${maxMessages}, max_facts=${options.maxFacts}`,
+      );
+      const output = await runSourceImport("claude", candidate.path, options, maxMessages);
+      options.progress?.(
+        `import-sync: claude imported ${output.imported_messages}/${output.total_messages} messages${output.capture_skipped ? " (capture skipped: tool-assisted)" : ""}`,
+      );
+
+      return {
+        nextState: {
+          session_file: candidate.path,
+          mtime_ms: candidate.mtime_ms,
+          size_bytes: candidate.size_bytes,
+          imported_at: new Date().toISOString(),
+          transcript_session_id: output.transcript_session_id,
+        },
+        result: toImportedResult(candidate.path, output, skippedCandidates),
+      };
+    } catch (error) {
+      if (isNoImportableMessagesError(error)) {
+        skippedCandidates.push(skippedNoImportableCandidate(candidate));
+        continue;
+      }
+
+      return {
+        result: {
+          status: "error",
+          latest_session_file: candidate.path,
+          message: error instanceof Error ? error.message : String(error),
+          ...(skippedCandidates.length > 0 ? { skipped_candidates: skippedCandidates } : {}),
+        },
+      };
+    }
+  }
+
+  options.progress?.("import-sync: claude skipped because no importable sessions were found");
+  return {
+    ...(previousState ? { nextState: previousState } : {}),
+    result: {
+      status: "skipped_no_importable_session",
+      latest_session_file: latest.path,
+      message: "No importable Claude user/assistant messages found in candidate session files",
+      skipped_candidates: skippedCandidates,
+      ...(previousState
+        ? {
+            previous_session_file: previousState.session_file,
+            transcript_session_id: previousState.transcript_session_id,
+          }
+        : {}),
+    },
   };
 }
 
@@ -288,6 +517,10 @@ async function syncSource(
 }> {
   const maxMessages = options.maxMessages ?? DEFAULT_MAX_MESSAGES;
   const maxSessionBytes = options.maxSessionBytes ?? DEFAULT_MAX_SESSION_BYTES;
+  if (source === "claude") {
+    return syncClaudeSource(latestRoot, previousState, options);
+  }
+
   options.progress?.(`import-sync: scanning ${source} root ${latestRoot}`);
   const latest = findLatestJsonlFile(latestRoot);
   if (!latest) {
@@ -338,26 +571,7 @@ async function syncSource(
     options.progress?.(
       `import-sync: ${source} importing with max_messages=${maxMessages}, max_facts=${options.maxFacts}`,
     );
-    const output =
-      source === "codex"
-        ? await runCodexImport({
-            sessionFile: latest.path,
-            projectPath: options.projectPath,
-            scopeType: "project",
-            sessionId: defaultCodexSessionIdFromFile(latest.path),
-            maxFacts: options.maxFacts,
-            maxMessages,
-            skipToolAssisted: options.skipToolAssisted,
-          })
-        : await runClaudeImport({
-            sessionFile: latest.path,
-            projectPath: options.projectPath,
-            scopeType: "project",
-            sessionId: defaultClaudeSessionIdFromFile(latest.path),
-            maxFacts: options.maxFacts,
-            maxMessages,
-            skipToolAssisted: options.skipToolAssisted,
-          });
+    const output = await runSourceImport(source, latest.path, options, maxMessages);
     options.progress?.(
       `import-sync: ${source} imported ${output.imported_messages}/${output.total_messages} messages${output.capture_skipped ? " (capture skipped: tool-assisted)" : ""}`,
     );
@@ -430,8 +644,11 @@ export async function runImportSync(
     project_path: projectPath,
     state_file: stateFile,
     imported_sources: sourceResults.filter((result) => result.status === "imported").length,
-    skipped_sources: sourceResults.filter((result) => result.status === "skipped_no_new_session")
-      .length,
+    skipped_sources: sourceResults.filter(
+      (result) =>
+        result.status === "skipped_no_new_session" ||
+        result.status === "skipped_no_importable_session",
+    ).length,
     results,
   };
 }

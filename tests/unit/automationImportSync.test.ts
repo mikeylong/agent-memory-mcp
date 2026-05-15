@@ -99,6 +99,22 @@ async function writeClaudeSession(filePath: string): Promise<void> {
   await fs.writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
 }
 
+async function writeClaudeTitleOnlySession(filePath: string): Promise<void> {
+  const lines = [
+    JSON.stringify({
+      type: "ai-title",
+      aiTitle: "Metadata-only title",
+      sessionId: path.basename(filePath, ".jsonl"),
+    }),
+  ];
+  await fs.writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
+}
+
+async function setFileMtime(filePath: string, timestamp: string): Promise<void> {
+  const date = new Date(timestamp);
+  await fs.utimes(filePath, date, date);
+}
+
 describe("automation import sync", () => {
   it("imports latest sessions once and skips unchanged reruns", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-memory-import-sync-"));
@@ -149,6 +165,125 @@ describe("automation import sync", () => {
       expect(second.skipped_sources).toBe(2);
       expect(second.results.codex.status).toBe("skipped_no_new_session");
       expect(second.results.claude.status).toBe("skipped_no_new_session");
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back past metadata-only Claude sessions to import the newest valid session", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-memory-import-sync-"));
+    const codexRoot = path.join(tempDir, "codex");
+    const claudeRoot = path.join(tempDir, "claude");
+    const projectPath = path.join(tempDir, "project");
+    const stateFile = path.join(tempDir, "import-sync-state.json");
+    const memoryHome = path.join(tempDir, "memory-home");
+
+    await fs.mkdir(path.join(claudeRoot, "workspace"), { recursive: true });
+    await fs.mkdir(projectPath, { recursive: true });
+
+    const validClaudeFile = path.join(claudeRoot, "workspace", "session-valid.jsonl");
+    const titleOnlyClaudeFile = path.join(claudeRoot, "workspace", "session-title.jsonl");
+    await writeClaudeSession(validClaudeFile);
+    await writeClaudeTitleOnlySession(titleOnlyClaudeFile);
+    await setFileMtime(validClaudeFile, "2026-03-12T10:00:00.000Z");
+    await setFileMtime(titleOnlyClaudeFile, "2026-03-12T10:05:00.000Z");
+
+    process.env.AGENT_MEMORY_HOME = memoryHome;
+    process.env.AGENT_MEMORY_DB_PATH = path.join(memoryHome, "memory.db");
+    process.env.AGENT_MEMORY_DISABLE_EMBEDDINGS = "1";
+
+    try {
+      const first = await runImportSync({
+        projectPath,
+        maxFacts: 5,
+        codexRoot,
+        claudeRoot,
+        stateFile,
+      });
+
+      expect(first.ok).toBe(true);
+      expect(first.imported_sources).toBe(1);
+      expect(first.results.claude.status).toBe("imported");
+      if (first.results.claude.status === "imported") {
+        expect(first.results.claude.latest_session_file).toBe(validClaudeFile);
+        expect(first.results.claude.imported_messages).toBe(2);
+        expect(first.results.claude.skipped_candidates).toEqual([
+          expect.objectContaining({
+            session_file: titleOnlyClaudeFile,
+            reason: "no_importable_messages",
+          }),
+        ]);
+      }
+
+      const state = JSON.parse(await fs.readFile(stateFile, "utf8")) as {
+        projects: Record<string, { claude?: { session_file: string } }>;
+      };
+      expect(state.projects[projectPath]?.claude?.session_file).toBe(validClaudeFile);
+
+      const second = await runImportSync({
+        projectPath,
+        maxFacts: 5,
+        codexRoot,
+        claudeRoot,
+        stateFile,
+      });
+
+      expect(second.ok).toBe(true);
+      expect(second.results.claude.status).toBe("skipped_no_new_session");
+      if (second.results.claude.status === "skipped_no_new_session") {
+        expect(second.results.claude.latest_session_file).toBe(validClaudeFile);
+        expect(second.results.claude.skipped_candidates).toEqual([
+          expect.objectContaining({
+            session_file: titleOnlyClaudeFile,
+            reason: "no_importable_messages",
+          }),
+        ]);
+      }
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports Claude metadata-only sessions as skipped instead of errored", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-memory-import-sync-"));
+    const codexRoot = path.join(tempDir, "codex");
+    const claudeRoot = path.join(tempDir, "claude");
+    const projectPath = path.join(tempDir, "project");
+    const stateFile = path.join(tempDir, "import-sync-state.json");
+    const memoryHome = path.join(tempDir, "memory-home");
+
+    await fs.mkdir(path.join(claudeRoot, "workspace"), { recursive: true });
+    await fs.mkdir(projectPath, { recursive: true });
+
+    const titleOnlyClaudeFile = path.join(claudeRoot, "workspace", "session-title.jsonl");
+    await writeClaudeTitleOnlySession(titleOnlyClaudeFile);
+
+    process.env.AGENT_MEMORY_HOME = memoryHome;
+    process.env.AGENT_MEMORY_DB_PATH = path.join(memoryHome, "memory.db");
+    process.env.AGENT_MEMORY_DISABLE_EMBEDDINGS = "1";
+
+    try {
+      const report = await runImportSync({
+        projectPath,
+        maxFacts: 5,
+        codexRoot,
+        claudeRoot,
+        stateFile,
+      });
+
+      expect(report.ok).toBe(true);
+      expect(report.imported_sources).toBe(0);
+      expect(report.skipped_sources).toBe(1);
+      expect(report.results.claude.status).toBe("skipped_no_importable_session");
+      if (report.results.claude.status === "skipped_no_importable_session") {
+        expect(report.results.claude.latest_session_file).toBe(titleOnlyClaudeFile);
+        expect(report.results.claude.skipped_candidates).toEqual([
+          expect.objectContaining({
+            session_file: titleOnlyClaudeFile,
+            reason: "no_importable_messages",
+          }),
+        ]);
+      }
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }

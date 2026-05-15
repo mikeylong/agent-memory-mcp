@@ -81,12 +81,12 @@ export function parsePositiveInt(value: string, flag: string): number {
   return parsed;
 }
 
-export function findLatestJsonlFile(root: string): LatestJsonlFile | null {
+export function listJsonlFilesNewestFirst(root: string): LatestJsonlFile[] {
   if (!fs.existsSync(root)) {
-    return null;
+    return [];
   }
 
-  let latest: LatestJsonlFile | null = null;
+  const files: LatestJsonlFile[] = [];
   const pendingDirs = [path.resolve(root)];
 
   while (pendingDirs.length > 0) {
@@ -108,15 +108,17 @@ export function findLatestJsonlFile(root: string): LatestJsonlFile | null {
       }
 
       const stats = fs.statSync(fullPath);
-      if (!latest || stats.mtimeMs > latest.mtime_ms) {
-        latest = {
-          path: fullPath,
-          mtime_ms: stats.mtimeMs,
-          size_bytes: stats.size,
-        };
-      }
+      files.push({
+        path: fullPath,
+        mtime_ms: stats.mtimeMs,
+        size_bytes: stats.size,
+      });
     }
   }
 
-  return latest;
+  return files.sort((a, b) => b.mtime_ms - a.mtime_ms);
+}
+
+export function findLatestJsonlFile(root: string): LatestJsonlFile | null {
+  return listJsonlFilesNewestFirst(root)[0] ?? null;
 }
