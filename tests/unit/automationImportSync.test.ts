@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { MemoryDb } from "../../src/db/client.js";
 import { runImportSync } from "../../src/automationImportSync.js";
 
 const originalEnv = {
@@ -110,9 +111,69 @@ async function writeClaudeTitleOnlySession(filePath: string): Promise<void> {
   await fs.writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
 }
 
+async function writeClaudeLargeSession(
+  filePath: string,
+  repeatCount = 256,
+): Promise<void> {
+  const lines = [
+    JSON.stringify({
+      timestamp: "2026-03-12T10:10:00.000Z",
+      type: "user",
+      message: {
+        role: "user",
+        content: `${"oversized session ".repeat(repeatCount)}`,
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-03-12T10:10:01.000Z",
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: "This should be older fallback material.",
+      },
+    }),
+  ];
+  await fs.writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
+}
+
 async function setFileMtime(filePath: string, timestamp: string): Promise<void> {
   const date = new Date(timestamp);
   await fs.utimes(filePath, date, date);
+}
+
+function transcriptPattern(tag: string): string {
+  return `%\"${tag}\"%`;
+}
+
+function countTranscriptRows(args: {
+  dbPath: string;
+  sessionId: string;
+  sourceTag: string;
+  active: boolean;
+}): number {
+  const db = new MemoryDb(args.dbPath);
+  try {
+    const row = db.db
+      .prepare(
+        `
+          SELECT COUNT(*) AS count
+          FROM memories
+          WHERE deleted_at IS ${args.active ? "" : "NOT "}NULL
+            AND scope_type = 'session'
+            AND scope_id = ?
+            AND tags_json LIKE ?
+            AND tags_json LIKE ?
+        `,
+      )
+      .get(
+        args.sessionId,
+        transcriptPattern(args.sourceTag),
+        transcriptPattern("transcript"),
+      ) as { count: number };
+    return row.count;
+  } finally {
+    db.close();
+  }
 }
 
 describe("automation import sync", () => {
@@ -289,6 +350,155 @@ describe("automation import sync", () => {
     }
   });
 
+  it("imports Claude sessions above the general size guard when under the Claude guard", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-memory-import-sync-"));
+    const codexRoot = path.join(tempDir, "codex");
+    const claudeRoot = path.join(tempDir, "claude");
+    const projectPath = path.join(tempDir, "project");
+    const stateFile = path.join(tempDir, "import-sync-state.json");
+    const memoryHome = path.join(tempDir, "memory-home");
+
+    await fs.mkdir(path.join(claudeRoot, "workspace"), { recursive: true });
+    await fs.mkdir(projectPath, { recursive: true });
+
+    const largeClaudeFile = path.join(claudeRoot, "workspace", "session-large.jsonl");
+    await writeClaudeLargeSession(largeClaudeFile, 70_000);
+
+    process.env.AGENT_MEMORY_HOME = memoryHome;
+    process.env.AGENT_MEMORY_DB_PATH = path.join(memoryHome, "memory.db");
+    process.env.AGENT_MEMORY_DISABLE_EMBEDDINGS = "1";
+
+    try {
+      const report = await runImportSync({
+        projectPath,
+        maxFacts: 5,
+        maxMessages: 1,
+        maxSessionBytes: 1024 * 1024,
+        codexRoot,
+        claudeRoot,
+        stateFile,
+      });
+
+      expect(report.ok).toBe(true);
+      expect(report.imported_sources).toBe(1);
+      expect(report.results.claude.status).toBe("imported");
+      if (report.results.claude.status === "imported") {
+        expect(report.results.claude.latest_session_file).toBe(largeClaudeFile);
+        expect(report.results.claude.imported_messages).toBe(1);
+        expect(report.results.claude.total_messages).toBe(2);
+        expect(report.results.claude.truncated_messages).toBe(1);
+        expect(report.results.claude.skipped_candidates).toBeUndefined();
+      }
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back past oversized Claude sessions to import an older valid session", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-memory-import-sync-"));
+    const codexRoot = path.join(tempDir, "codex");
+    const claudeRoot = path.join(tempDir, "claude");
+    const projectPath = path.join(tempDir, "project");
+    const stateFile = path.join(tempDir, "import-sync-state.json");
+    const memoryHome = path.join(tempDir, "memory-home");
+
+    await fs.mkdir(path.join(claudeRoot, "workspace"), { recursive: true });
+    await fs.mkdir(projectPath, { recursive: true });
+
+    const validClaudeFile = path.join(claudeRoot, "workspace", "session-valid.jsonl");
+    const largeClaudeFile = path.join(claudeRoot, "workspace", "session-large.jsonl");
+    await writeClaudeSession(validClaudeFile);
+    await writeClaudeLargeSession(largeClaudeFile);
+    await setFileMtime(validClaudeFile, "2026-03-12T10:00:00.000Z");
+    await setFileMtime(largeClaudeFile, "2026-03-12T10:05:00.000Z");
+
+    process.env.AGENT_MEMORY_HOME = memoryHome;
+    process.env.AGENT_MEMORY_DB_PATH = path.join(memoryHome, "memory.db");
+    process.env.AGENT_MEMORY_DISABLE_EMBEDDINGS = "1";
+
+    try {
+      const report = await runImportSync({
+        projectPath,
+        maxFacts: 5,
+        maxClaudeSessionBytes: 1024,
+        codexRoot,
+        claudeRoot,
+        stateFile,
+      });
+
+      expect(report.ok).toBe(true);
+      expect(report.imported_sources).toBe(1);
+      expect(report.results.claude.status).toBe("imported");
+      if (report.results.claude.status === "imported") {
+        expect(report.results.claude.latest_session_file).toBe(validClaudeFile);
+        expect(report.results.claude.skipped_candidates).toEqual([
+          expect.objectContaining({
+            session_file: largeClaudeFile,
+            reason: "too_large",
+          }),
+        ]);
+      }
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports skipped_too_large when every Claude candidate exceeds the Claude guard", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-memory-import-sync-"));
+    const codexRoot = path.join(tempDir, "codex");
+    const claudeRoot = path.join(tempDir, "claude");
+    const projectPath = path.join(tempDir, "project");
+    const stateFile = path.join(tempDir, "import-sync-state.json");
+    const memoryHome = path.join(tempDir, "memory-home");
+
+    await fs.mkdir(path.join(claudeRoot, "workspace"), { recursive: true });
+    await fs.mkdir(projectPath, { recursive: true });
+
+    const newerLargeFile = path.join(claudeRoot, "workspace", "session-newer-large.jsonl");
+    const olderLargeFile = path.join(claudeRoot, "workspace", "session-older-large.jsonl");
+    await writeClaudeLargeSession(newerLargeFile);
+    await writeClaudeLargeSession(olderLargeFile);
+    await setFileMtime(olderLargeFile, "2026-03-12T10:00:00.000Z");
+    await setFileMtime(newerLargeFile, "2026-03-12T10:05:00.000Z");
+
+    process.env.AGENT_MEMORY_HOME = memoryHome;
+    process.env.AGENT_MEMORY_DB_PATH = path.join(memoryHome, "memory.db");
+    process.env.AGENT_MEMORY_DISABLE_EMBEDDINGS = "1";
+
+    try {
+      const report = await runImportSync({
+        projectPath,
+        maxFacts: 5,
+        maxClaudeSessionBytes: 1024,
+        codexRoot,
+        claudeRoot,
+        stateFile,
+      });
+
+      expect(report.ok).toBe(true);
+      expect(report.imported_sources).toBe(0);
+      expect(report.skipped_sources).toBe(1);
+      expect(report.results.claude.status).toBe("skipped_too_large");
+      if (report.results.claude.status === "skipped_too_large") {
+        expect(report.results.claude.latest_session_file).toBe(newerLargeFile);
+        expect(report.results.claude.max_size_bytes).toBe(1024);
+        expect(report.results.claude.skipped_candidates).toHaveLength(2);
+        expect(report.results.claude.skipped_candidates).toEqual([
+          expect.objectContaining({
+            session_file: newerLargeFile,
+            reason: "too_large",
+          }),
+          expect.objectContaining({
+            session_file: olderLargeFile,
+            reason: "too_large",
+          }),
+        ]);
+      }
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("skips a new latest session that exceeds the configured size guard", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-memory-import-sync-"));
     const codexRoot = path.join(tempDir, "codex");
@@ -321,6 +531,7 @@ describe("automation import sync", () => {
 
       expect(report.ok).toBe(true);
       expect(report.imported_sources).toBe(0);
+      expect(report.skipped_sources).toBe(1);
       expect(report.results.codex.status).toBe("skipped_too_large");
       if (report.results.codex.status === "skipped_too_large") {
         expect(report.results.codex.max_size_bytes).toBe(64);
@@ -367,6 +578,82 @@ describe("automation import sync", () => {
         expect(report.results.codex.total_messages).toBe(4);
         expect(report.results.codex.truncated_messages).toBe(2);
       }
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reimports appended latest Codex sessions without leaving duplicate active transcripts", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-memory-import-sync-"));
+    const codexRoot = path.join(tempDir, "codex");
+    const claudeRoot = path.join(tempDir, "claude");
+    const projectPath = path.join(tempDir, "project");
+    const stateFile = path.join(tempDir, "import-sync-state.json");
+    const memoryHome = path.join(tempDir, "memory-home");
+    const dbPath = path.join(memoryHome, "memory.db");
+
+    await fs.mkdir(path.join(codexRoot, "2026", "03", "12"), { recursive: true });
+    await fs.mkdir(projectPath, { recursive: true });
+
+    const codexFile = path.join(codexRoot, "2026", "03", "12", "rollout-append.jsonl");
+    await writeCodexSessionTexts(codexFile, ["Use pnpm in this repo.", "Recorded."]);
+    await setFileMtime(codexFile, "2026-03-12T10:00:00.000Z");
+
+    process.env.AGENT_MEMORY_HOME = memoryHome;
+    process.env.AGENT_MEMORY_DB_PATH = dbPath;
+    process.env.AGENT_MEMORY_DISABLE_EMBEDDINGS = "1";
+
+    try {
+      const first = await runImportSync({
+        projectPath,
+        maxFacts: 5,
+        codexRoot,
+        claudeRoot,
+        stateFile,
+      });
+
+      await writeCodexSessionTexts(codexFile, [
+        "Use pnpm in this repo.",
+        "Recorded.",
+        "Keep importer lifecycle tests focused.",
+        "Recorded in the appended transcript.",
+      ]);
+      await setFileMtime(codexFile, "2026-03-12T10:05:00.000Z");
+
+      const second = await runImportSync({
+        projectPath,
+        maxFacts: 5,
+        codexRoot,
+        claudeRoot,
+        stateFile,
+      });
+
+      expect(first.results.codex.status).toBe("imported");
+      if (first.results.codex.status === "imported") {
+        expect(first.results.codex.retired_transcripts).toBe(0);
+      }
+      expect(second.results.codex.status).toBe("imported");
+      if (second.results.codex.status === "imported") {
+        expect(second.results.codex.transcript_session_id).toBe("import-rollout-append");
+        expect(second.results.codex.retired_transcripts).toBe(1);
+        expect(second.results.codex.total_messages).toBe(4);
+      }
+      expect(
+        countTranscriptRows({
+          dbPath,
+          sessionId: "import-rollout-append",
+          sourceTag: "codex-session",
+          active: true,
+        }),
+      ).toBe(1);
+      expect(
+        countTranscriptRows({
+          dbPath,
+          sessionId: "import-rollout-append",
+          sourceTag: "codex-session",
+          active: false,
+        }),
+      ).toBe(1);
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }

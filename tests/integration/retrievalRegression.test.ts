@@ -1,3 +1,4 @@
+import BetterSqlite3 from "better-sqlite3";
 import { hashProjectPath } from "../../src/scope.js";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -35,6 +36,15 @@ interface ScopeContract {
 interface NoiseFixtureSeed {
   query: string;
   cleanContent: string;
+}
+
+interface GrowthPressureFixtureSeed {
+  query: string;
+  projectPath: string;
+  sessionId: string;
+  cleanContent: string;
+  expiredContent: string;
+  noisyContents: string[];
 }
 
 interface NoiseMode {
@@ -185,6 +195,131 @@ async function seedNoiseContractMemories(fixture: ClientFixture): Promise<NoiseF
   };
 }
 
+async function upsertFixtureMemory(
+  fixture: ClientFixture,
+  args: Record<string, unknown>,
+): Promise<{ id: string }> {
+  const result = await fixture.client.callTool({
+    name: "memory_upsert",
+    arguments: args,
+  });
+  return parseToolPayload(result as any) as { id: string };
+}
+
+function markMemoryExpired(dbPath: string, id: string): void {
+  const db = new BetterSqlite3(dbPath);
+  try {
+    db.pragma("busy_timeout = 3000");
+    db
+      .prepare("UPDATE memories SET expires_at = ?, updated_at = ? WHERE id = ?")
+      .run("2000-01-01T00:00:00.000Z", "2000-01-01T00:00:00.000Z", id);
+  } finally {
+    db.close();
+  }
+}
+
+async function seedGrowthPressureMemories(
+  fixture: ClientFixture,
+): Promise<GrowthPressureFixtureSeed> {
+  const query = "durable retrieval growth pressure lighthouse code";
+  const targetModulo = query.length % 10;
+  const projectPath = "/tmp/retrieval-growth-pressure-project";
+  const sessionId = "retrieval-growth-pressure-session";
+  const cleanContent = padToEmbeddingModulo(
+    `${query} target answer: jade-anchor`,
+    targetModulo,
+  );
+  const expiredContent = padToEmbeddingModulo(
+    `${query} target answer: expired-crimson`,
+    targetModulo,
+  );
+  const noisyContents: string[] = [];
+
+  await upsertFixtureMemory(fixture, {
+    scope: { type: "project", id: hashProjectPath(projectPath) },
+    content: cleanContent,
+    tags: ["canonical"],
+    metadata: {
+      project_path: projectPath,
+      normalized_key: "retrieval_growth_pressure_lighthouse_code",
+    },
+    importance: 1,
+  });
+
+  const expired = await upsertFixtureMemory(fixture, {
+    scope: { type: "session", id: sessionId },
+    content: expiredContent,
+    tags: ["captured", "transcript"],
+    metadata: {
+      captured: true,
+      fixture: "expired_high_similarity",
+    },
+    importance: 1,
+  });
+  markMemoryExpired(fixture.dbPath, expired.id);
+
+  for (let index = 0; index < 12; index += 1) {
+    const content = padToEmbeddingModulo(
+      `Assistant: ${query} imported global transcript speculation ${String(index).padStart(2, "0")}`,
+      targetModulo,
+    );
+    noisyContents.push(content);
+    await upsertFixtureMemory(fixture, {
+      scope: { type: "global" },
+      content,
+      tags: ["import", "chatgpt-export", "transcript"],
+      metadata: {
+        captured: true,
+      },
+      importance: 0.1,
+    });
+  }
+
+  for (let index = 0; index < 8; index += 1) {
+    const content = padToEmbeddingModulo(
+      `User: ${query} captured project chatter without final answer ${String(index).padStart(2, "0")}`,
+      targetModulo,
+    );
+    noisyContents.push(content);
+    await upsertFixtureMemory(fixture, {
+      scope: { type: "project", id: hashProjectPath(projectPath) },
+      content,
+      tags: ["captured", "transcript"],
+      metadata: {
+        captured: true,
+        project_path: projectPath,
+      },
+      importance: 0.1,
+    });
+  }
+
+  for (let index = 0; index < 8; index += 1) {
+    const content = padToEmbeddingModulo(
+      `Assistant: ${query} captured session chatter without final answer ${String(index).padStart(2, "0")}`,
+      targetModulo,
+    );
+    noisyContents.push(content);
+    await upsertFixtureMemory(fixture, {
+      scope: { type: "session", id: sessionId },
+      content,
+      tags: ["captured", "turn-log"],
+      metadata: {
+        captured: true,
+      },
+      importance: 0.1,
+    });
+  }
+
+  return {
+    query,
+    projectPath,
+    sessionId,
+    cleanContent,
+    expiredContent,
+    noisyContents,
+  };
+}
+
 async function seedCanonicalLatestWriteFixture(fixture: ClientFixture): Promise<CanonicalFixtureSeed> {
   const sessionId = "retrieval-contract-canonical-session";
   const query = "favorite retrieval contract zebra color";
@@ -317,6 +452,41 @@ const NOISE_TOOL_CALLS: readonly {
   },
 ];
 
+const GROWTH_PRESSURE_TOOL_CALLS: readonly {
+  tool: RetrievalToolName;
+  buildArguments: (seed: GrowthPressureFixtureSeed) => Record<string, unknown>;
+}[] = [
+  {
+    tool: "memory_search",
+    buildArguments: (seed) => ({
+      query: seed.query,
+      project_path: seed.projectPath,
+      session_id: seed.sessionId,
+      limit: 10,
+      include_metadata: true,
+    }),
+  },
+  {
+    tool: "memory_search_compact",
+    buildArguments: (seed) => ({
+      query: seed.query,
+      project_path: seed.projectPath,
+      session_id: seed.sessionId,
+      limit: 10,
+    }),
+  },
+  {
+    tool: "memory_get_context",
+    buildArguments: (seed) => ({
+      query: seed.query,
+      project_path: seed.projectPath,
+      session_id: seed.sessionId,
+      max_items: 10,
+      token_budget: 2000,
+    }),
+  },
+];
+
 const NOISE_MODES: readonly NoiseMode[] = [
   {
     name: "lexical-only",
@@ -351,6 +521,21 @@ const NOISE_MODES: readonly NoiseMode[] = [
     },
   },
 ];
+
+function assertCleanTargetAboveGrowthNoise(payload: any, seed: GrowthPressureFixtureSeed): void {
+  const contents = payload.items.map((item: any) => item.content);
+  const targetRank = contents.indexOf(seed.cleanContent);
+  expect(targetRank).toBe(0);
+  expect(contents).not.toContain(seed.expiredContent);
+
+  const noisyRanks = seed.noisyContents
+    .map((content) => contents.indexOf(content))
+    .filter((rank) => rank !== -1);
+
+  for (const noisyRank of noisyRanks) {
+    expect(targetRank).toBeLessThan(noisyRank);
+  }
+}
 
 describe("retrieval regression contracts", () => {
   for (const contract of SCOPE_CONTRACTS) {
@@ -414,6 +599,37 @@ describe("retrieval regression contracts", () => {
 
         expect(payload.items.length).toBeGreaterThan(0);
         expect(payload.items[0].content).toBe(seeded.cleanContent);
+
+        if (toolCall.tool === "memory_search") {
+          expect(toolText(result as any)).toBe(expectedSearchSummary(payload));
+        }
+      }
+    });
+  }
+
+  for (const mode of NOISE_MODES) {
+    it(`${mode.name} keeps clean retrieval above growth-pressure noise and excludes expired rows`, async () => {
+      const runtime = await mode.createEnv();
+      if (runtime.cleanup) {
+        cleanups.push(runtime.cleanup);
+      }
+
+      const fixture = await createClientFixture({
+        envOverrides: runtime.envOverrides,
+      });
+      cleanups.push(fixture.cleanup);
+
+      const seeded = await seedGrowthPressureMemories(fixture);
+
+      for (const toolCall of GROWTH_PRESSURE_TOOL_CALLS) {
+        const result = await fixture.client.callTool({
+          name: toolCall.tool,
+          arguments: toolCall.buildArguments(seeded),
+        });
+        const payload = parseToolPayload(result as any);
+
+        expect(payload.items.length).toBeGreaterThan(0);
+        assertCleanTargetAboveGrowthNoise(payload, seeded);
 
         if (toolCall.tool === "memory_search") {
           expect(toolText(result as any)).toBe(expectedSearchSummary(payload));

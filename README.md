@@ -302,7 +302,7 @@ Recommended automation checks:
 Included automation-oriented CLIs:
 
 - `npm run -s automation:health-drift`
-- `npm run -s automation:import-sync -- --project-path <path> [--max-session-bytes <n>] [--max-messages <n>] [--source-timeout-ms <n>]`
+- `npm run -s automation:import-sync -- --project-path <path> [--max-session-bytes <n>] [--max-claude-session-bytes <n>] [--max-messages <n>] [--source-timeout-ms <n>]`
 - `npm run -s automation:durability-audit -- [--recent-hours <n>] [--recent-limit <n>] [--synthesis-limit <n>]`
 - `npm run -s automation:retrieval-qa`
 - `npm run -s automation:cleanup -- --dry-run|--apply [--before <iso>]`

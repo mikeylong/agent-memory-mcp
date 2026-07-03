@@ -41,6 +41,7 @@ export interface ImportOutput {
   capture_skipped: boolean;
   capture_skip_reason?: string;
   tool_assistance: ToolAssistanceSummary;
+  retired_transcripts: number;
 }
 
 interface SessionMessage {
@@ -292,6 +293,41 @@ function resolveScope(options: ImportOptions): ScopeRef {
   };
 }
 
+function tagLikePattern(tag: string): string {
+  return `%\"${tag}\"%`;
+}
+
+function retireOlderActiveSessionTranscripts(
+  db: MemoryDb,
+  sessionId: string,
+  keepId: string,
+): number {
+  const nowIso = new Date().toISOString();
+  const result = db.db
+    .prepare(
+      `
+        UPDATE memories
+        SET deleted_at = ?, updated_at = ?
+        WHERE deleted_at IS NULL
+          AND scope_type = 'session'
+          AND scope_id = ?
+          AND id <> ?
+          AND tags_json LIKE ?
+          AND tags_json LIKE ?
+      `,
+    )
+    .run(
+      nowIso,
+      nowIso,
+      sessionId,
+      keepId,
+      tagLikePattern("codex-session"),
+      tagLikePattern("transcript"),
+    );
+
+  return result.changes;
+}
+
 export async function runImport(options: ImportOptions): Promise<ImportOutput> {
   if (!fs.existsSync(options.sessionFile)) {
     throw new Error(`Session file not found: ${options.sessionFile}`);
@@ -352,6 +388,11 @@ export async function runImport(options: ImportOptions): Promise<ImportOutput> {
         tool_assistance: toolAssistance,
       },
     });
+    const retiredTranscripts = retireOlderActiveSessionTranscripts(
+      db,
+      options.sessionId,
+      upsertResult.id,
+    );
 
     const captureResult = captureSkipped
       ? emptyCaptureResult()
@@ -378,6 +419,7 @@ export async function runImport(options: ImportOptions): Promise<ImportOutput> {
         ? TOOL_ASSISTED_CAPTURE_SKIP_REASON
         : undefined,
       tool_assistance: toolAssistance,
+      retired_transcripts: retiredTranscripts,
     };
   } finally {
     db.close();

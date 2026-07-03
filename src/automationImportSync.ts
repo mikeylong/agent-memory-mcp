@@ -28,6 +28,7 @@ import { ToolAssistanceSummary, defaultSkipToolAssisted } from "./toolAssistance
 type ImportSyncSource = "codex" | "claude";
 
 const DEFAULT_MAX_SESSION_BYTES = 1024 * 1024;
+const DEFAULT_MAX_CLAUDE_SESSION_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_MESSAGES = 80;
 const DEFAULT_SOURCE_TIMEOUT_MS = 120_000;
 const NO_IMPORTABLE_MESSAGES_ERROR =
@@ -53,6 +54,7 @@ interface ImportSyncOptions {
   maxFacts: number;
   maxMessages?: number;
   maxSessionBytes?: number;
+  maxClaudeSessionBytes?: number;
   skipToolAssisted?: boolean;
   codexRoot: string;
   claudeRoot: string;
@@ -72,6 +74,7 @@ interface ImportedSourceResult {
   total_messages: number;
   truncated_messages: number;
   transcript_created: boolean;
+  retired_transcripts: number;
   captured_created: number;
   captured_deduped: number;
   capture_skipped: boolean;
@@ -120,7 +123,7 @@ interface SkippedSessionCandidate {
   session_file: string;
   mtime_ms: number;
   size_bytes: number;
-  reason: "no_importable_messages";
+  reason: "no_importable_messages" | "too_large";
   message: string;
 }
 
@@ -149,7 +152,8 @@ function helpText(): string {
     "  --project-path <path>   Project path to capture imported facts into (default: cwd)",
     "  --max-facts <n>         Max facts per imported session (default: 25)",
     `  --max-messages <n>      Import only the newest n messages per source (default: ${DEFAULT_MAX_MESSAGES})`,
-    `  --max-session-bytes <n> Skip a new session file above n bytes (default: ${DEFAULT_MAX_SESSION_BYTES})`,
+    `  --max-session-bytes <n> Skip a new Codex session file above n bytes (default: ${DEFAULT_MAX_SESSION_BYTES})`,
+    `  --max-claude-session-bytes <n> Skip a new Claude session file above n bytes (default: ${DEFAULT_MAX_CLAUDE_SESSION_BYTES})`,
     `  --source-timeout-ms <n> Max total CLI runtime budget per source before process exit (default: ${DEFAULT_SOURCE_TIMEOUT_MS})`,
     "  --skip-tool-assisted    Skip extracted facts when non-memory tools/web were used (default)",
     "  --no-skip-tool-assisted Capture extracted facts even when tools/web were used",
@@ -165,6 +169,7 @@ function parseArgs(argv: string[]): ImportSyncCliOptions {
   let maxFacts = 25;
   let maxMessages = DEFAULT_MAX_MESSAGES;
   let maxSessionBytes = DEFAULT_MAX_SESSION_BYTES;
+  let maxClaudeSessionBytes = DEFAULT_MAX_CLAUDE_SESSION_BYTES;
   let skipToolAssisted = defaultSkipToolAssisted();
   let sourceTimeoutMs = DEFAULT_SOURCE_TIMEOUT_MS;
   let codexRoot = path.join(process.env.HOME ?? "~", ".codex", "sessions");
@@ -214,6 +219,16 @@ function parseArgs(argv: string[]): ImportSyncCliOptions {
         throw new Error("--max-session-bytes requires a value");
       }
       maxSessionBytes = parsePositiveInt(value, "--max-session-bytes");
+      i += 1;
+      continue;
+    }
+
+    if (arg === "--max-claude-session-bytes") {
+      const value = argv[i + 1];
+      if (!value) {
+        throw new Error("--max-claude-session-bytes requires a value");
+      }
+      maxClaudeSessionBytes = parsePositiveInt(value, "--max-claude-session-bytes");
       i += 1;
       continue;
     }
@@ -276,6 +291,7 @@ function parseArgs(argv: string[]): ImportSyncCliOptions {
     maxFacts,
     maxMessages,
     maxSessionBytes,
+    maxClaudeSessionBytes,
     skipToolAssisted,
     sourceTimeoutMs,
     codexRoot,
@@ -297,6 +313,7 @@ function toImportedResult(
     total_messages: output.total_messages,
     truncated_messages: output.truncated_messages,
     transcript_created: output.upsert.created,
+    retired_transcripts: output.retired_transcripts,
     captured_created: output.capture.created_ids.length,
     captured_deduped: output.capture.deduped_ids.length,
     capture_skipped: output.capture_skipped,
@@ -368,7 +385,8 @@ async function syncClaudeSource(
   result: SourceResult;
 }> {
   const maxMessages = options.maxMessages ?? DEFAULT_MAX_MESSAGES;
-  const maxSessionBytes = options.maxSessionBytes ?? DEFAULT_MAX_SESSION_BYTES;
+  const maxClaudeSessionBytes =
+    options.maxClaudeSessionBytes ?? DEFAULT_MAX_CLAUDE_SESSION_BYTES;
   const skippedCandidates: SkippedSessionCandidate[] = [];
 
   options.progress?.(`import-sync: scanning claude root ${latestRoot}`);
@@ -415,19 +433,18 @@ async function syncClaudeSource(
       };
     }
 
-    if (candidate.size_bytes > maxSessionBytes) {
+    if (candidate.size_bytes > maxClaudeSessionBytes) {
       options.progress?.(
-        `import-sync: claude skipped because latest remaining candidate exceeds ${maxSessionBytes} bytes`,
+        `import-sync: claude skipping ${candidate.path} because it exceeds ${maxClaudeSessionBytes} bytes`,
       );
-      return {
-        result: {
-          status: "skipped_too_large",
-          latest_session_file: candidate.path,
-          size_bytes: candidate.size_bytes,
-          max_size_bytes: maxSessionBytes,
-          ...(skippedCandidates.length > 0 ? { skipped_candidates: skippedCandidates } : {}),
-        },
-      };
+      skippedCandidates.push({
+        session_file: candidate.path,
+        mtime_ms: candidate.mtime_ms,
+        size_bytes: candidate.size_bytes,
+        reason: "too_large",
+        message: `Session file exceeds ${maxClaudeSessionBytes} bytes`,
+      });
+      continue;
     }
 
     let importable: boolean;
@@ -486,6 +503,24 @@ async function syncClaudeSource(
         },
       };
     }
+  }
+
+  const allSkippedCandidatesWereTooLarge =
+    skippedCandidates.length > 0 &&
+    skippedCandidates.every((candidate) => candidate.reason === "too_large");
+  if (allSkippedCandidatesWereTooLarge) {
+    const firstSkipped = skippedCandidates[0];
+    options.progress?.("import-sync: claude skipped because all candidate sessions exceeded the size guard");
+    return {
+      ...(previousState ? { nextState: previousState } : {}),
+      result: {
+        status: "skipped_too_large",
+        latest_session_file: firstSkipped.session_file,
+        size_bytes: firstSkipped.size_bytes,
+        max_size_bytes: maxClaudeSessionBytes,
+        skipped_candidates: skippedCandidates,
+      },
+    };
   }
 
   options.progress?.("import-sync: claude skipped because no importable sessions were found");
@@ -604,6 +639,8 @@ export async function runImportSync(
     ...options,
     maxMessages: options.maxMessages ?? DEFAULT_MAX_MESSAGES,
     maxSessionBytes: options.maxSessionBytes ?? DEFAULT_MAX_SESSION_BYTES,
+    maxClaudeSessionBytes:
+      options.maxClaudeSessionBytes ?? DEFAULT_MAX_CLAUDE_SESSION_BYTES,
     skipToolAssisted: options.skipToolAssisted ?? defaultSkipToolAssisted(),
   };
   const config = loadConfig();
@@ -647,7 +684,8 @@ export async function runImportSync(
     skipped_sources: sourceResults.filter(
       (result) =>
         result.status === "skipped_no_new_session" ||
-        result.status === "skipped_no_importable_session",
+        result.status === "skipped_no_importable_session" ||
+        result.status === "skipped_too_large",
     ).length,
     results,
   };

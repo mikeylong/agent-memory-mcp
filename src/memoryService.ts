@@ -386,29 +386,94 @@ function deterministicSummary(items: MemoryItem[]): string {
     .join("\n");
 }
 
-function extractFactCandidates(rawText: string, summaryHint?: string): string[] {
-  const source = summaryHint ? `${summaryHint}\n${rawText}` : rawText;
-  const parts = source
+const CAPTURE_PROMPT_ECHO_PATTERNS = [
+  /\bUser prompt\s*:/i,
+  /\bUser message\s*:/i,
+  /\bAssistant response\s*:/i,
+  /\bAssistant message\s*:/i,
+  /^(?:[-*]\s*)?(?:\[[^\]]+\]\s*)?(?:User|Assistant)(?:\s+message)?\s*:/i,
+  /\bTask\s*:/i,
+  /\bReturn\s*:/i,
+  /\bYou are one of several agents\b/i,
+  /\bread-only planning pass\b/i,
+  /\bexact[- ]reply\b/i,
+  /\b(?:reply|respond|say)\s+(?:exactly|only)\b/i,
+] as const;
+
+const DURABLE_CAPTURE_SIGNAL_PATTERNS = [
+  /\bprefer(?:s|red|ence)?\b/i,
+  /\bwants?\b/i,
+  /\b(?:always|never|avoid|remember)\b/i,
+  /\b(?:convention|policy|rule|standard|canonical|durable|long[- ]lived)\b/i,
+  /\buse\s+.+\b(?:repo|repository|project|workspace)\b/i,
+  /\b(?:repo|repository|project|workspace)\b.*\buse\b/i,
+  /\buse exactly\b/i,
+  /\b(?:owner|deadline)\b/i,
+  /\b(?:repo|repository|project|workspace)\b.*\b(?:uses?|requires?|stores?|keeps?|owns?|configures?|is|are|has|default)\b/i,
+  /\b(?:path|file|directory|module|script|command|branch|worktree|schema|table|column|metadata)\b.*\b(?:is|are|lives?|stored|located|configured|owned|required|default)\b/i,
+] as const;
+
+function normalizeCaptureCandidate(text: string): string {
+  return text
+    .replace(
+      /^(?:[-*]\s*)?(?:\[[^\]]+\]\s*)?(?:User prompt|User message|Assistant response|Assistant message|User|Assistant|Task|Return)\s*:\s*/i,
+      "",
+    )
+    .trim();
+}
+
+function isPromptEchoCandidate(text: string): boolean {
+  return CAPTURE_PROMPT_ECHO_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function hasDurableCaptureSignal(text: string): boolean {
+  return DURABLE_CAPTURE_SIGNAL_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function shouldKeepCaptureCandidate(original: string, normalized: string): boolean {
+  if (!isPromptEchoCandidate(original)) {
+    return true;
+  }
+
+  return hasDurableCaptureSignal(normalized);
+}
+
+function extractFactCandidates(rawText: string): string[] {
+  const parts = rawText
     .split(/\n+|(?<=[.!?])\s+/)
-    .map((part) => part.trim())
-    .filter((part) => part.length >= 20 && part.length <= 600);
+    .map((part) => {
+      const original = part.trim();
+      return {
+        original,
+        normalized: normalizeCaptureCandidate(original),
+      };
+    })
+    .filter(({ normalized }) => normalized.length >= 20 && normalized.length <= 600);
 
   const deduped = new Map<string, string>();
-  for (const part of parts) {
-    const key = part.toLowerCase();
+  for (const { original, normalized } of parts) {
+    if (!shouldKeepCaptureCandidate(original, normalized)) {
+      continue;
+    }
+
+    const key = normalized.toLowerCase();
     if (!deduped.has(key)) {
-      deduped.set(key, part);
+      deduped.set(key, normalized);
     }
   }
 
   return [...deduped.values()];
 }
 
-function factScore(text: string): number {
+function factScore(text: string, summaryHint?: string): number {
   let score = Math.min(text.length / 120, 1.25);
 
-  if (/\b(prefer|always|never|must|should|avoid|remember|deadline|owner|path|repo|project|session)\b/i.test(text)) {
+  if (hasDurableCaptureSignal(text)) {
     score += 1;
+  }
+
+  if (summaryHint && sharedSummaryHintTermCount(text, summaryHint) >= 2) {
+    score += 0.2;
   }
 
   if (/\d/.test(text)) {
@@ -424,6 +489,23 @@ function factScore(text: string): number {
   }
 
   return score;
+}
+
+function sharedSummaryHintTermCount(text: string, summaryHint: string): number {
+  const textTerms = new Set(text.toLowerCase().match(/[a-z0-9_/-]{4,}/g) ?? []);
+  if (textTerms.size === 0) {
+    return 0;
+  }
+
+  const hintTerms = new Set(summaryHint.toLowerCase().match(/[a-z0-9_/-]{4,}/g) ?? []);
+  let shared = 0;
+  for (const term of hintTerms) {
+    if (textTerms.has(term)) {
+      shared += 1;
+    }
+  }
+
+  return shared;
 }
 
 function buildActiveWhere(scopes: ScopeSelector[], alias: string): { clause: string; params: string[] } {
@@ -1240,9 +1322,10 @@ export class MemoryService {
     extracted_count: number;
   }> {
     const maxFacts = Math.max(1, Math.min(20, input.max_facts ?? 5));
-    const candidates = extractFactCandidates(input.raw_text, input.summary_hint)
-      .sort((a, b) => factScore(b) - factScore(a))
+    const candidates = extractFactCandidates(input.raw_text)
+      .sort((a, b) => factScore(b, input.summary_hint) - factScore(a, input.summary_hint))
       .slice(0, maxFacts);
+    const tags = mergeTags(["captured"], cleanTags(input.tags));
 
     const createdIds: string[] = [];
     const dedupedIds: string[] = [];
@@ -1251,7 +1334,7 @@ export class MemoryService {
       const result = await this.upsert({
         scope: input.scope,
         content: candidate,
-        tags: input.tags,
+        tags,
         importance: 0.6,
         metadata: {
           captured: true,
