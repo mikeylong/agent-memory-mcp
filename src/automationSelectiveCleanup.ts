@@ -5,6 +5,7 @@ import { createConfiguredRuntime, parsePositiveInt } from "./automationCommon.js
 
 const DEFAULT_EXPIRED_GRACE_DAYS = 7;
 const CAPTURED_GRACE_DAYS = 45;
+const PROTECTED_TAG_PATTERNS = ['"canonical"', "preference", "favorite", '"style"'];
 
 type CleanupPolicy = "moderate" | "expired-only";
 
@@ -169,6 +170,10 @@ function toCandidate(row: CleanupRow): CleanupCandidate {
   };
 }
 
+function protectedTagExclusions(): string {
+  return PROTECTED_TAG_PATTERNS.map((pattern) => `AND lower(tags_json) NOT LIKE '%${pattern}%'`).join("\n          ");
+}
+
 function queryExpiredCandidates(db: Database, expiredBefore: string): CleanupRow[] {
   return db
     .prepare(
@@ -179,8 +184,7 @@ function queryExpiredCandidates(db: Database, expiredBefore: string): CleanupRow
           AND expires_at IS NOT NULL
           AND expires_at <= ?
           AND canonical_key IS NULL
-          AND lower(tags_json) NOT LIKE '%"canonical"%'
-          AND lower(tags_json) NOT LIKE '%"user-preference"%'
+          ${protectedTagExclusions()}
         ORDER BY expires_at ASC, updated_at ASC, id ASC
       `,
     )
@@ -200,8 +204,7 @@ function queryCapturedCandidates(db: Database, updatedBefore: string): CleanupRo
             OR COALESCE(json_extract(metadata_json, '$.captured'), 0) = 1
           )
           AND canonical_key IS NULL
-          AND lower(tags_json) NOT LIKE '%"canonical"%'
-          AND lower(tags_json) NOT LIKE '%"user-preference"%'
+          ${protectedTagExclusions()}
         ORDER BY updated_at ASC, id ASC
       `,
     )

@@ -53,9 +53,9 @@ const DAILY_HEALTH_PROMPT =
 const IMPORT_SYNC_PROMPT_PREFIX =
   "Run npm run -s automation:import-sync -- --project-path";
 const IMPORT_SYNC_PROMPT_SUFFIX =
-  "--max-session-bytes 1048576 --max-messages 80 --source-timeout-ms 120000. Report per source whether Codex and Claude were imported, skipped, missing, too large, or errored, and include session file paths, imported and total message counts, truncation counts, captured created and deduped counts, and any timeout or size guard.";
+  "--max-session-bytes 1048576 --max-claude-session-bytes 8388608 --max-messages 80 --source-timeout-ms 120000. Report per source whether Codex and Claude were imported, skipped, missing, or errored, and include session file paths, imported and total message counts, truncation counts, captured created and deduped counts, and any timeout or size guard that blocked a source.";
 const QA_PROMPT =
-  "Run npm run -s automation:retrieval-qa in the repo. Report pass or fail, the assertion results, the top search and context results, and the cleanup deleted count. If it fails, list the failing assertions first.";
+  "Run npm run -s automation:retrieval-qa in the repo. Report pass or fail, retrieval quality_metrics including target_rank, hit_at_1, hit_at_3, MRR, expired_leak_count, stale_canonical_leak_count, noisy_top_k_count, and cleanup_deleted_count, plus assertion results and top search/context results. If it fails, list the failing assertions first.";
 const CLEANUP_PROMPT =
   "Run npm run -s automation:cleanup -- --dry-run --sample-limit 10. Report counts, deleted_count, and candidate samples for expired and captured_noise. Do not run --apply from this scheduled automation. If counts.total is nonzero, recommend manual review and an explicit one-off apply command.";
 const MEMORY_DURABILITY_AUDIT_PROMPT =

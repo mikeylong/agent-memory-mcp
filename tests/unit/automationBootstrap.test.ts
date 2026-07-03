@@ -105,7 +105,7 @@ describe("automation bootstrap recommendations", () => {
         id: "memory-import-sync",
         name: "Memory import sync",
         rrule: "FREQ=HOURLY;INTERVAL=6",
-        prompt: `Run npm run -s automation:import-sync -- --project-path ${projectPath} --max-session-bytes 1048576 --max-messages 80 --source-timeout-ms 120000. Report per source whether Codex and Claude were imported, skipped, missing, too large, or errored, and include session file paths, imported and total message counts, truncation counts, captured created and deduped counts, and any timeout or size guard.`,
+        prompt: `Run npm run -s automation:import-sync -- --project-path ${projectPath} --max-session-bytes 1048576 --max-claude-session-bytes 8388608 --max-messages 80 --source-timeout-ms 120000. Report per source whether Codex and Claude were imported, skipped, missing, or errored, and include session file paths, imported and total message counts, truncation counts, captured created and deduped counts, and any timeout or size guard that blocked a source.`,
         cwds: [repoPath],
         presence: "missing",
       },
@@ -114,7 +114,7 @@ describe("automation bootstrap recommendations", () => {
         name: "Memory QA smoke",
         rrule: "FREQ=WEEKLY;BYDAY=MO;BYHOUR=10;BYMINUTE=0",
         prompt:
-          "Run npm run -s automation:retrieval-qa in the repo. Report pass or fail, the assertion results, the top search and context results, and the cleanup deleted count. If it fails, list the failing assertions first.",
+          "Run npm run -s automation:retrieval-qa in the repo. Report pass or fail, retrieval quality_metrics including target_rank, hit_at_1, hit_at_3, MRR, expired_leak_count, stale_canonical_leak_count, noisy_top_k_count, and cleanup_deleted_count, plus assertion results and top search/context results. If it fails, list the failing assertions first.",
         cwds: [repoPath],
         presence: "missing",
       },

@@ -89,6 +89,208 @@ describe("automation health drift", () => {
     expect(report.deltas.week?.db_size_bytes).toBe(150);
   });
 
+  it("skips empty DB snapshots when choosing drift baselines for a populated DB", () => {
+    const populated = makeHealth({
+      stats: {
+        ...makeHealth().stats,
+        memories: { ...makeHealth().stats.memories, active: 1000 },
+        storage: {
+          ...makeHealth().stats.storage,
+          db_size_bytes: 100 * 1024 * 1024,
+          idempotency_keys: 200,
+        },
+      },
+    });
+    const history = [
+      snapshot(
+        "2026-03-01T10:00:00.000Z",
+        makeHealth({
+          stats: {
+            ...makeHealth().stats,
+            memories: { ...makeHealth().stats.memories, active: 0 },
+            storage: {
+              ...makeHealth().stats.storage,
+              db_size_bytes: 90 * 1024,
+              idempotency_keys: 0,
+            },
+          },
+        }),
+      ),
+      snapshot("2026-03-07T10:00:00.000Z", populated),
+    ];
+
+    const report = buildHealthDriftReport(
+      snapshot("2026-03-08T10:00:00.000Z", populated),
+      history,
+      "/tmp/health-history.json",
+    );
+
+    expect(report.ok).toBe(true);
+    expect(report.alerts.map((alert) => alert.code)).not.toContain("db_growth_week");
+    expect(report.deltas.day?.active_memories).toBe(0);
+    expect(report.deltas.week).toBeUndefined();
+  });
+
+  it("scales daily growth thresholds by elapsed time since the previous snapshot", () => {
+    const baseline = makeHealth({
+      stats: {
+        ...makeHealth().stats,
+        memories: { ...makeHealth().stats.memories, active: 100 },
+        storage: { ...makeHealth().stats.storage, db_size_bytes: 1000, idempotency_keys: 100 },
+      },
+    });
+    const current = makeHealth({
+      stats: {
+        ...makeHealth().stats,
+        memories: { ...makeHealth().stats.memories, active: 900 },
+        storage: { ...makeHealth().stats.storage, db_size_bytes: 1000, idempotency_keys: 100 },
+      },
+    });
+
+    const report = buildHealthDriftReport(
+      snapshot("2026-03-03T10:00:00.000Z", current),
+      [snapshot("2026-03-01T10:00:00.000Z", baseline)],
+      "/tmp/health-history.json",
+    );
+
+    expect(report.ok).toBe(true);
+    expect(report.deltas.day?.active_memories).toBe(800);
+    expect(report.alerts.map((alert) => alert.code)).not.toContain("active_growth_day");
+  });
+
+  it("still alerts when active growth exceeds the per-day threshold", () => {
+    const baseline = makeHealth({
+      stats: {
+        ...makeHealth().stats,
+        memories: { ...makeHealth().stats.memories, active: 100 },
+        storage: { ...makeHealth().stats.storage, db_size_bytes: 1000, idempotency_keys: 100 },
+      },
+    });
+    const current = makeHealth({
+      stats: {
+        ...makeHealth().stats,
+        memories: { ...makeHealth().stats.memories, active: 701 },
+        storage: { ...makeHealth().stats.storage, db_size_bytes: 1000, idempotency_keys: 100 },
+      },
+    });
+
+    const report = buildHealthDriftReport(
+      snapshot("2026-03-02T10:00:00.000Z", current),
+      [snapshot("2026-03-01T10:00:00.000Z", baseline)],
+      "/tmp/health-history.json",
+    );
+
+    expect(report.ok).toBe(false);
+    expect(report.alerts.map((alert) => alert.code)).toContain("active_growth_day");
+  });
+
+  it("scales daily DB growth thresholds by elapsed time since the previous snapshot", () => {
+    const baseline = makeHealth({
+      stats: {
+        ...makeHealth().stats,
+        storage: { ...makeHealth().stats.storage, db_size_bytes: 1000 },
+      },
+    });
+    const current = makeHealth({
+      stats: {
+        ...makeHealth().stats,
+        storage: { ...makeHealth().stats.storage, db_size_bytes: 1060 },
+      },
+    });
+
+    const report = buildHealthDriftReport(
+      snapshot("2026-03-03T10:00:00.000Z", current),
+      [snapshot("2026-03-01T10:00:00.000Z", baseline)],
+      "/tmp/health-history.json",
+    );
+
+    expect(report.ok).toBe(true);
+    expect(report.alerts.map((alert) => alert.code)).not.toContain("db_growth_day");
+  });
+
+  it("still alerts when DB growth exceeds the per-day threshold", () => {
+    const baseline = makeHealth({
+      stats: {
+        ...makeHealth().stats,
+        storage: { ...makeHealth().stats.storage, db_size_bytes: 1000 },
+      },
+    });
+    const current = makeHealth({
+      stats: {
+        ...makeHealth().stats,
+        storage: { ...makeHealth().stats.storage, db_size_bytes: 1110 },
+      },
+    });
+
+    const report = buildHealthDriftReport(
+      snapshot("2026-03-03T10:00:00.000Z", current),
+      [snapshot("2026-03-01T10:00:00.000Z", baseline)],
+      "/tmp/health-history.json",
+    );
+
+    expect(report.ok).toBe(false);
+    expect(report.alerts.map((alert) => alert.code)).toContain("db_growth_day");
+  });
+
+  it("keeps expired-active streaks inside cleanup grace as notices", () => {
+    const baseline = makeHealth();
+    const expiredHealth = makeHealth({
+      stats: {
+        ...baseline.stats,
+        memories: { ...baseline.stats.memories, expired_active: 2 },
+      },
+    });
+
+    const report = buildHealthDriftReport(
+      snapshot("2026-03-08T10:00:00.000Z", expiredHealth),
+      [
+        snapshot("2026-03-06T10:00:00.000Z", expiredHealth),
+        snapshot("2026-03-07T10:00:00.000Z", expiredHealth),
+      ],
+      "/tmp/health-history.json",
+    );
+
+    expect(report.ok).toBe(true);
+    expect(report.expired_active_streak).toBe(3);
+    expect(report.expired_active.status).toBe("grace_pending");
+    expect(report.expired_active.cleanup_grace_days).toBe(7);
+    expect(report.alerts.map((alert) => alert.code)).not.toContain(
+      "expired_active_streak",
+    );
+    expect(report.notices.map((notice) => notice.code)).toContain(
+      "expired_active_grace_pending",
+    );
+  });
+
+  it("keeps aggregate expired-active streaks after cleanup grace as notices", () => {
+    const baseline = makeHealth();
+    const expiredHealth = makeHealth({
+      stats: {
+        ...baseline.stats,
+        memories: { ...baseline.stats.memories, expired_active: 2 },
+      },
+    });
+
+    const report = buildHealthDriftReport(
+      snapshot("2026-03-08T10:00:00.000Z", expiredHealth),
+      [
+        snapshot("2026-03-01T10:00:00.000Z", expiredHealth),
+        snapshot("2026-03-07T10:00:00.000Z", expiredHealth),
+      ],
+      "/tmp/health-history.json",
+    );
+
+    const expiredNotice = report.notices.find(
+      (notice) => notice.code === "expired_active_streak",
+    );
+    expect(report.ok).toBe(true);
+    expect(report.expired_active.status).toBe("cleanup_review");
+    expect(report.expired_active.observed_for_days).toBe(7);
+    expect(expiredNotice?.message).toContain("7-day cleanup grace");
+    expect(expiredNotice?.message).toContain("dry-run");
+    expect(expiredNotice?.message).toContain("does not fail health");
+  });
+
   it("raises alerts for degraded embeddings, growth spikes, and expired streaks", () => {
     const baseline = makeHealth();
     const history = [
@@ -149,9 +351,11 @@ describe("automation health drift", () => {
         "db_growth_week",
         "active_growth_day",
         "idempotency_growth_day",
-        "expired_active_streak",
         "max_content_outlier",
       ]),
+    );
+    expect(report.notices.map((notice) => notice.code)).toContain(
+      "expired_active_streak",
     );
   });
 
@@ -225,6 +429,39 @@ describe("automation health drift", () => {
             embeddings: {
               ...baseline.stats.embeddings,
               rows: 90,
+              oversized_transcript_rows: 2,
+              chunked_oversized_transcript_rows: 2,
+            },
+            storage: {
+              ...baseline.stats.storage,
+              max_content_bytes: 1024 * 1024 + 1,
+            },
+          },
+        }),
+      ),
+      [],
+      "/tmp/health-history.json",
+    );
+
+    expect(report.ok).toBe(true);
+    expect(report.alerts).toEqual([]);
+    expect(report.notices.map((notice) => notice.code)).toContain(
+      "max_content_outlier_chunked",
+    );
+  });
+
+  it("keeps fully chunked oversized transcript rows informational when unrelated parent embeddings are missing", () => {
+    const baseline = makeHealth();
+    const report = buildHealthDriftReport(
+      snapshot(
+        "2026-03-08T10:00:00.000Z",
+        makeHealth({
+          stats: {
+            ...baseline.stats,
+            memories: { ...baseline.stats.memories, active: 120 },
+            embeddings: {
+              ...baseline.stats.embeddings,
+              rows: 100,
               oversized_transcript_rows: 2,
               chunked_oversized_transcript_rows: 2,
             },

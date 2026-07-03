@@ -13,6 +13,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const WEEK_LOOKBACK_MS = 6 * DAY_MS;
 const MAX_HISTORY_ENTRIES = 120;
 const MAX_CONTENT_BYTES_ALERT = 1024 * 1024;
+const EMPTY_DB_BASELINE_BYTES = 1024 * 1024;
+// Integration note: replace this history-based inference once health stats expose
+// expired grace-pending, protected, and cleanup-eligible buckets directly.
+const DEFAULT_EXPIRED_CLEANUP_GRACE_DAYS = 7;
 
 export interface HealthSnapshot {
   recorded_at: string;
@@ -40,6 +44,15 @@ interface HealthDelta {
   idempotency_keys: number;
 }
 
+interface ExpiredActiveAssessment {
+  current_count: number;
+  streak: number;
+  cleanup_grace_days: number;
+  streak_started_at?: string;
+  observed_for_days: number;
+  status: "none" | "grace_pending" | "cleanup_review";
+}
+
 export interface HealthDriftReport {
   ok: boolean;
   recorded_at: string;
@@ -50,6 +63,7 @@ export interface HealthDriftReport {
     week?: HealthDelta;
   };
   expired_active_streak: number;
+  expired_active: ExpiredActiveAssessment;
   alerts: HealthDriftAlert[];
   notices: HealthDriftNotice[];
 }
@@ -103,12 +117,40 @@ function hasHealthStats(
 
 function selectBaseline(
   snapshots: HealthSnapshot[],
+  current: HealthSnapshot,
   referenceTimeMs: number,
   minAgeMs: number,
 ): HealthSnapshot | undefined {
   return [...snapshots]
     .reverse()
-    .find((snapshot) => referenceTimeMs - Date.parse(snapshot.recorded_at) >= minAgeMs);
+    .find(
+      (snapshot) =>
+        referenceTimeMs - Date.parse(snapshot.recorded_at) >= minAgeMs &&
+        isComparableBaseline(current, snapshot),
+    );
+}
+
+function selectPreviousBaseline(
+  snapshots: HealthSnapshot[],
+  current: HealthSnapshot,
+): HealthSnapshot | undefined {
+  return [...snapshots]
+    .reverse()
+    .find((snapshot) => isComparableBaseline(current, snapshot));
+}
+
+function isComparableBaseline(current: HealthSnapshot, baseline: HealthSnapshot): boolean {
+  const currentActive = current.health.stats.memories.active;
+  const baselineActive = baseline.health.stats.memories.active;
+  const currentDbBytes = current.health.stats.storage.db_size_bytes;
+  const baselineDbBytes = baseline.health.stats.storage.db_size_bytes;
+
+  return !(
+    baselineActive === 0 &&
+    currentActive > 0 &&
+    baselineDbBytes < EMPTY_DB_BASELINE_BYTES &&
+    currentDbBytes >= EMPTY_DB_BASELINE_BYTES
+  );
 }
 
 function buildDelta(current: HealthSnapshot, baseline: HealthSnapshot): HealthDelta {
@@ -130,17 +172,73 @@ function percentGrowth(current: number, baseline: number): number {
   return (current - baseline) / baseline;
 }
 
+function elapsedDays(current: HealthSnapshot, baseline: HealthSnapshot): number {
+  const elapsedMs = Date.parse(current.recorded_at) - Date.parse(baseline.recorded_at);
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) {
+    return 1;
+  }
+
+  return Math.max(1, elapsedMs / DAY_MS);
+}
+
+function observedDays(current: HealthSnapshot, streakStartedAt?: string): number {
+  if (!streakStartedAt) {
+    return 0;
+  }
+
+  const elapsedMs = Date.parse(current.recorded_at) - Date.parse(streakStartedAt);
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) {
+    return 0;
+  }
+
+  return elapsedMs / DAY_MS;
+}
+
+function assessExpiredActive(current: HealthSnapshot, history: HealthSnapshot[]): ExpiredActiveAssessment {
+  const streakHistory = [...history, current].reverse();
+  const currentCount = current.health.stats.memories.expired_active;
+  let streak = 0;
+  let streakStartedAt: string | undefined;
+
+  for (const snapshot of streakHistory) {
+    if (snapshot.health.stats.memories.expired_active <= 0) {
+      break;
+    }
+
+    streak += 1;
+    streakStartedAt = snapshot.recorded_at;
+  }
+
+  const daysObserved = observedDays(current, streakStartedAt);
+  const status =
+    currentCount <= 0
+      ? "none"
+      : streak >= 3 && daysObserved >= DEFAULT_EXPIRED_CLEANUP_GRACE_DAYS
+        ? "cleanup_review"
+        : "grace_pending";
+
+  return {
+    current_count: currentCount,
+    streak,
+    cleanup_grace_days: DEFAULT_EXPIRED_CLEANUP_GRACE_DAYS,
+    streak_started_at: streakStartedAt,
+    observed_for_days: daysObserved,
+    status,
+  };
+}
+
 export function buildHealthDriftReport(
   current: HealthSnapshot,
   history: HealthSnapshot[],
   historyFile: string,
 ): HealthDriftReport {
   const referenceTimeMs = Date.parse(current.recorded_at);
-  const dayBaseline =
-    history.length > 0 ? history[history.length - 1] : undefined;
-  const weekBaseline = selectBaseline(history, referenceTimeMs, WEEK_LOOKBACK_MS);
+  const dayBaseline = selectPreviousBaseline(history, current);
+  const weekBaseline = selectBaseline(history, current, referenceTimeMs, WEEK_LOOKBACK_MS);
   const dayDelta = dayBaseline ? buildDelta(current, dayBaseline) : undefined;
   const weekDelta = weekBaseline ? buildDelta(current, weekBaseline) : undefined;
+  const expiredActive = assessExpiredActive(current, history);
+  const dayWindow = dayBaseline ? elapsedDays(current, dayBaseline) : 1;
   const alerts: HealthDriftAlert[] = [];
   const notices: HealthDriftNotice[] = [];
 
@@ -156,11 +254,11 @@ export function buildHealthDriftReport(
     percentGrowth(
       current.health.stats.storage.db_size_bytes,
       dayBaseline.health.stats.storage.db_size_bytes,
-    ) > 0.05
+    ) > 0.05 * dayWindow
   ) {
     alerts.push({
       code: "db_growth_day",
-      message: "DB size grew by more than 5% since the previous daily snapshot.",
+      message: "DB size grew by more than 5% per day since the previous snapshot.",
     });
   }
 
@@ -177,33 +275,31 @@ export function buildHealthDriftReport(
     });
   }
 
-  if ((dayDelta?.active_memories ?? 0) > 500) {
-    alerts.push({
-      code: "active_growth_day",
-      message: "Active memories increased by more than 500 since the previous daily snapshot.",
-    });
-  }
-
-  if ((dayDelta?.idempotency_keys ?? 0) > 250) {
-    alerts.push({
-      code: "idempotency_growth_day",
-      message: "Idempotency keys increased by more than 250 since the previous daily snapshot.",
-    });
-  }
-
-  const streakHistory = [...history, current].reverse();
-  let expiredActiveStreak = 0;
-  for (const snapshot of streakHistory) {
-    if (snapshot.health.stats.memories.expired_active <= 0) {
-      break;
+  if (dayDelta) {
+    if (dayDelta.active_memories > 500 * dayWindow) {
+      alerts.push({
+        code: "active_growth_day",
+        message: "Active memories increased by more than 500 per day since the previous snapshot.",
+      });
     }
-    expiredActiveStreak += 1;
+
+    if (dayDelta.idempotency_keys > 250 * dayWindow) {
+      alerts.push({
+        code: "idempotency_growth_day",
+        message: "Idempotency keys increased by more than 250 per day since the previous snapshot.",
+      });
+    }
   }
 
-  if (expiredActiveStreak >= 3) {
-    alerts.push({
+  if (expiredActive.status === "cleanup_review") {
+    notices.push({
       code: "expired_active_streak",
-      message: "Expired active memories have remained above zero for three consecutive runs.",
+      message: `Expired active memories have persisted across the ${DEFAULT_EXPIRED_CLEANUP_GRACE_DAYS}-day cleanup grace. Run cleanup dry-run with --expired-only and review candidates before any explicit one-off apply; health stats are aggregate and do not yet split protected or cleanup-eligible rows, so this notice does not fail health.`,
+    });
+  } else if (expiredActive.status === "grace_pending") {
+    notices.push({
+      code: "expired_active_grace_pending",
+      message: `Expired active memories are present, but the current positive streak has not spanned the ${DEFAULT_EXPIRED_CLEANUP_GRACE_DAYS}-day cleanup grace. Scheduled cleanup remains dry-run only; cleanup dry-run is the source of truth for protected-row exclusions.`,
     });
   }
 
@@ -215,14 +311,6 @@ export function buildHealthDriftReport(
     current.health.stats.embeddings.chunked_oversized_transcript_rows ?? 0;
 
   if (
-    current.health.stats.storage.max_content_bytes > MAX_CONTENT_BYTES_ALERT &&
-    !parentEmbeddingCoverageComplete
-  ) {
-    alerts.push({
-      code: "max_content_outlier",
-      message: "The largest active memory exceeds 1 MB while active embedding coverage is incomplete.",
-    });
-  } else if (
     current.health.stats.storage.max_content_bytes > MAX_CONTENT_BYTES_ALERT &&
     oversizedTranscriptRows > chunkedOversizedTranscriptRows
   ) {
@@ -237,6 +325,14 @@ export function buildHealthDriftReport(
     notices.push({
       code: "max_content_outlier_chunked",
       message: "Oversized imported transcript memories exceed 1 MB, but parent and chunk embedding coverage is complete.",
+    });
+  } else if (
+    current.health.stats.storage.max_content_bytes > MAX_CONTENT_BYTES_ALERT &&
+    !parentEmbeddingCoverageComplete
+  ) {
+    alerts.push({
+      code: "max_content_outlier",
+      message: "The largest active memory exceeds 1 MB while active embedding coverage is incomplete.",
     });
   } else if (current.health.stats.storage.max_content_bytes > MAX_CONTENT_BYTES_ALERT) {
     notices.push({
@@ -254,7 +350,8 @@ export function buildHealthDriftReport(
       day: dayDelta,
       week: weekDelta,
     },
-    expired_active_streak: expiredActiveStreak,
+    expired_active_streak: expiredActive.streak,
+    expired_active: expiredActive,
     alerts,
     notices,
   };
